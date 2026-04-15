@@ -1,0 +1,17 @@
+node_modules/
+uploads/*
+!uploads/.gitkeep
+.DS_Store
+*.dmg
+*.png
+*.jpg
+.floorplan_preview/
+tmp_*
+aqt_lines.json
+eco_hidden_lines.json
+build_ppt.js
+vision_ocr.swift
+vision_pdf_lines.swift
+tools/
+vpn.dmg
+wechat_cover.jpg

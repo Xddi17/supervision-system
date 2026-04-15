@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>督办管理系统</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+</head>
+<body>
+  <div id="app">
+
+    <!-- ═══════════════ 登录页 ═══════════════ -->
+    <div id="login-page" class="auth-wrapper">
+      <div class="auth-card">
+        <div class="auth-title">
+          <h1>督办管理系统</h1>
+          <p>重点工作督办事项管理平台</p>
+        </div>
+        <form id="login-form" autocomplete="off">
+          <div class="form-group">
+            <label>用户名 <span class="required">*</span></label>
+            <input type="text" id="login-username" class="form-control" placeholder="请输入用户名" required>
+          </div>
+          <div class="form-group">
+            <label>密码 <span class="required">*</span></label>
+            <input type="password" id="login-password" class="form-control" placeholder="请输入密码" required>
+          </div>
+          <button type="submit" class="btn btn-primary btn-block btn-lg" id="login-btn">登 录</button>
+        </form>
+        <div style="text-align:center; margin-top:16px;">
+          <button class="btn btn-ghost" id="show-register-btn">没有账号？注册新账号</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ 注册页 ═══════════════ -->
+    <div id="register-page" class="auth-wrapper hidden">
+      <div class="auth-card">
+        <div class="auth-title">
+          <h1>注册新账号</h1>
+          <p>注册后需等待管理员审核通过后方可登录</p>
+        </div>
+        <form id="register-form" autocomplete="off">
+          <div class="form-group">
+            <label>姓名 <span class="required">*</span></label>
+            <input type="text" id="reg-name" class="form-control" placeholder="请输入真实姓名" required>
+          </div>
+          <div class="form-group">
+            <label>用户名 <span class="required">*</span></label>
+            <input type="text" id="reg-username" class="form-control" placeholder="用于登录的用户名" required>
+          </div>
+          <div class="form-group">
+            <label>密码 <span class="required">*</span></label>
+            <input type="password" id="reg-password" class="form-control" placeholder="至少6位" required minlength="6">
+          </div>
+          <div class="form-group">
+            <label>确认密码 <span class="required">*</span></label>
+            <input type="password" id="reg-password2" class="form-control" placeholder="再次输入密码" required>
+          </div>
+          <div class="form-group">
+            <label>所属单位 <span class="required">*</span></label>
+            <input type="text" id="reg-unit" class="form-control" placeholder="请输入所属单位名称" required>
+          </div>
+          <button type="submit" class="btn btn-primary btn-block btn-lg">提交注册</button>
+        </form>
+        <div style="text-align:center; margin-top:16px;">
+          <button class="btn btn-ghost" id="show-login-btn">已有账号？返回登录</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ 主界面（登录后） ═══════════════ -->
+    <div id="main-app" class="hidden">
+
+      <!-- 顶栏 -->
+      <div class="top-bar">
+        <div class="logo">督办管理系统</div>
+        <div class="user-area">
+          <span class="user-name" id="topbar-user"></span>
+          <button class="btn btn-sm btn-ghost" style="color:#fff;" id="btn-change-pwd">修改密码</button>
+          <button class="btn btn-sm btn-ghost" style="color:#fff;" id="btn-logout">退出</button>
+        </div>
+      </div>
+
+      <div class="main-layout">
+
+        <!-- 侧边栏 -->
+        <nav class="sidebar" id="sidebar">
+          <div class="nav-item active" data-page="dashboard">
+            <span class="nav-icon">&#9632;</span> 工作台
+          </div>
+          <div class="nav-item" data-page="tasks">
+            <span class="nav-icon">&#9776;</span> 督办台账
+          </div>
+          <div class="nav-item" data-page="stats">
+            <span class="nav-icon">&#9733;</span> 统计分析
+          </div>
+          <div class="nav-divider"></div>
+          <div class="nav-item admin-only hidden" data-page="users">
+            <span class="nav-icon">&#9734;</span> 用户管理
+          </div>
+          <div class="nav-item admin-only hidden" data-page="units">
+            <span class="nav-icon">&#9670;</span> 单位管理
+          </div>
+          <div class="nav-item admin-only hidden" data-page="logs">
+            <span class="nav-icon">&#9998;</span> 操作日志
+          </div>
+        </nav>
+
+        <!-- 主内容区 -->
+        <main class="content-area">
+
+          <!-- ── 工作台 ── -->
+          <div id="page-dashboard" class="page active">
+            <div class="page-header"><h2>工作台</h2></div>
+            <div class="stat-grid" id="dash-stats"></div>
+            <div class="card">
+              <div class="card-header"><h3>最近更新的任务</h3></div>
+              <div class="card-body">
+                <ul class="recent-list" id="dash-recent"></ul>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── 督办台账 ── -->
+          <div id="page-tasks" class="page">
+            <div class="page-header">
+              <h2>督办台账</h2>
+              <div class="actions">
+                <button class="btn btn-primary admin-only hidden" id="btn-add-task">新增任务</button>
+                <button class="btn btn-success admin-only hidden" id="btn-import-excel">导入 Excel</button>
+                <button class="btn btn-outline" id="btn-export-excel">导出 Excel</button>
+              </div>
+            </div>
+
+            <!-- 筛选 -->
+            <div class="filter-bar">
+              <div class="filter-row">
+                <div class="filter-item">
+                  <label>责任主体</label>
+                  <select id="filter-unit" class="form-control"><option value="">全部</option></select>
+                </div>
+                <div class="filter-item">
+                  <label>完成状态</label>
+                  <select id="filter-status" class="form-control">
+                    <option value="">全部</option>
+                    <option value="已完成">已完成</option>
+                    <option value="推进中">推进中</option>
+                    <option value="已超期">已超期</option>
+                    <option value="已终止">已终止</option>
+                  </select>
+                </div>
+                <div class="filter-item">
+                  <label>关键词</label>
+                  <input type="text" id="filter-keyword" class="form-control" placeholder="搜索任务/编号/领导/责任人">
+                </div>
+                <div class="filter-actions">
+                  <button class="btn btn-primary btn-sm" id="btn-filter">筛选</button>
+                  <button class="btn btn-outline btn-sm" id="btn-filter-reset">重置</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 任务表格 -->
+            <div class="table-wrapper">
+              <table id="task-table">
+                <thead>
+                  <tr>
+                    <th class="col-unit">责任主体</th>
+                    <th class="col-content">工作任务</th>
+                    <th class="col-leader">牵头领导</th>
+                    <th class="col-person">责任人</th>
+                    <th class="col-deadline">完成日期</th>
+                    <th class="col-progress">进度情况</th>
+                    <th class="col-status">是否完成</th>
+                    <th class="col-attach">证明材料</th>
+                    <th class="col-blockers">遇到堵点</th>
+                    <th class="col-coord">需领导协调事项</th>
+                    <th class="col-actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="task-tbody"></tbody>
+              </table>
+            </div>
+            <div class="table-footer">
+              <span>共 <strong id="task-count">0</strong> 条记录</span>
+            </div>
+          </div>
+
+          <!-- ── 统计分析 ── -->
+          <div id="page-stats" class="page">
+            <div class="page-header"><h2>统计分析</h2>
+              <div class="actions"><button class="btn btn-outline btn-sm" id="btn-refresh-stats">刷新</button></div>
+            </div>
+            <div class="stat-grid" id="stats-overview"></div>
+            <div class="chart-grid">
+              <div class="chart-card"><h4>完成状态分布</h4><canvas id="chart-status"></canvas></div>
+              <div class="chart-card"><h4>责任主体分布</h4><canvas id="chart-unit"></canvas></div>
+              <div class="chart-card full-width"><h4>各单位完成情况</h4><canvas id="chart-unit-status"></canvas></div>
+            </div>
+
+            <!-- 按状态分类的任务列表 -->
+            <div class="stats-task-lists">
+              <div class="stats-status-section" id="stats-section-inprogress">
+                <div class="stats-section-header warning-header" data-toggle="stats-list-inprogress">
+                  <h3>推进中 (<span id="stats-cnt-inprogress">0</span>)</h3>
+                  <span class="toggle-icon">&#9660;</span>
+                </div>
+                <div class="stats-task-list" id="stats-list-inprogress"></div>
+              </div>
+              <div class="stats-status-section" id="stats-section-completed">
+                <div class="stats-section-header success-header" data-toggle="stats-list-completed">
+                  <h3>已完成 (<span id="stats-cnt-completed">0</span>)</h3>
+                  <span class="toggle-icon">&#9660;</span>
+                </div>
+                <div class="stats-task-list" id="stats-list-completed"></div>
+              </div>
+              <div class="stats-status-section" id="stats-section-overdue">
+                <div class="stats-section-header danger-header" data-toggle="stats-list-overdue">
+                  <h3>已超期 (<span id="stats-cnt-overdue">0</span>)</h3>
+                  <span class="toggle-icon">&#9660;</span>
+                </div>
+                <div class="stats-task-list" id="stats-list-overdue"></div>
+              </div>
+              <div class="stats-status-section" id="stats-section-terminated">
+                <div class="stats-section-header gray-header" data-toggle="stats-list-terminated">
+                  <h3>已终止 (<span id="stats-cnt-terminated">0</span>)</h3>
+                  <span class="toggle-icon">&#9660;</span>
+                </div>
+                <div class="stats-task-list" id="stats-list-terminated"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── 用户管理 ── -->
+          <div id="page-users" class="page admin-only">
+            <div class="page-header"><h2>用户管理</h2></div>
+
+            <!-- 待审核 -->
+            <div class="card mb-16" id="pending-section">
+              <div class="card-header"><h3>待审核账号 (<span id="pending-count">0</span>)</h3></div>
+              <div class="card-body" id="pending-list"></div>
+            </div>
+
+            <!-- 所有用户 -->
+            <div class="card">
+              <div class="card-header"><h3>所有用户</h3></div>
+              <div class="card-body" style="padding:0;">
+                <div class="table-wrapper" style="border:none;box-shadow:none;">
+                  <table id="users-table">
+                    <thead>
+                      <tr>
+                        <th>ID</th><th>用户名</th><th>姓名</th><th>单位</th>
+                        <th>角色</th><th>状态</th><th>单位权限</th><th>注册时间</th><th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="users-tbody"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── 单位管理 ── -->
+          <div id="page-units" class="page admin-only">
+            <div class="page-header">
+              <h2>单位管理</h2>
+              <div class="actions">
+                <button class="btn btn-primary" id="btn-add-unit">新增单位</button>
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-body" style="padding:0;">
+                <div class="table-wrapper" style="border:none;box-shadow:none;">
+                  <table>
+                    <thead><tr><th>ID</th><th>单位名称</th><th>排序</th><th>操作</th></tr></thead>
+                    <tbody id="units-tbody"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── 操作日志 ── -->
+          <div id="page-logs" class="page admin-only">
+            <div class="page-header"><h2>操作日志</h2></div>
+            <div class="card">
+              <div class="card-body" style="padding:0;">
+                <div class="table-wrapper" style="border:none;box-shadow:none;">
+                  <table>
+                    <thead><tr><th>时间</th><th>用户</th><th>操作</th><th>目标类型</th><th>目标ID</th><th>详情</th></tr></thead>
+                    <tbody id="logs-tbody"></tbody>
+                  </table>
+                </div>
+              </div>
+              <div class="card-footer flex justify-between items-center">
+                <span id="logs-info" class="text-muted"></span>
+                <div class="flex gap-8">
+                  <button class="btn btn-sm btn-outline" id="btn-logs-prev">上一页</button>
+                  <button class="btn btn-sm btn-outline" id="btn-logs-next">下一页</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </main>
+      </div>
+    </div>
+
+    <!-- ═══════════════ 模态框容器 ═══════════════ -->
+
+    <!-- 新增/编辑任务 -->
+    <div class="modal-overlay" id="modal-task">
+      <div class="modal modal-lg">
+        <div class="modal-header">
+          <h3 id="modal-task-title">新增任务</h3>
+          <button class="modal-close" data-close="modal-task">&times;</button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" id="task-edit-id">
+          <div class="form-row">
+            <div class="form-group"><label>编号</label><input type="text" id="task-no" class="form-control" placeholder="如: 1"></div>
+            <div class="form-group"><label>责任主体 <span class="required">*</span></label><input type="text" id="task-unit" class="form-control"></div>
+          </div>
+          <div class="form-group"><label>工作任务 <span class="required">*</span></label><textarea id="task-content" class="form-control" rows="3"></textarea></div>
+          <div class="form-row">
+            <div class="form-group"><label>牵头领导</label><input type="text" id="task-leader" class="form-control"></div>
+            <div class="form-group"><label>责任人</label><input type="text" id="task-person" class="form-control"></div>
+            <div class="form-group"><label>要求完成日期</label><input type="date" id="task-deadline" class="form-control"></div>
+          </div>
+          <div class="form-row">
+            <div class="form-group"><label>进度情况</label><textarea id="task-progress" class="form-control" rows="2"></textarea></div>
+            <div class="form-group"><label>是否完成</label>
+              <select id="task-status" class="form-control">
+                <option value="推进中">推进中</option>
+                <option value="已完成">已完成</option>
+                <option value="已超期">已超期</option>
+                <option value="已终止">已终止</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group"><label>遇到堵点</label><textarea id="task-blockers" class="form-control" rows="2"></textarea></div>
+          <div class="form-group"><label>需要领导协调解决的事项</label><textarea id="task-coordination" class="form-control" rows="2"></textarea></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" data-close="modal-task">取消</button>
+          <button class="btn btn-primary" id="btn-save-task">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 审核弹窗 -->
+    <div class="modal-overlay" id="modal-approve">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>审核用户</h3>
+          <button class="modal-close" data-close="modal-approve">&times;</button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" id="approve-user-id">
+          <p id="approve-user-info" style="margin-bottom:16px;"></p>
+          <div class="form-group">
+            <label>分配单位权限 <span class="required">*</span></label>
+            <p class="text-muted" style="font-size:12px;margin-bottom:6px;">审核通过时必须至少选择一个单位</p>
+            <div class="unit-checkbox-list" id="approve-unit-list"></div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-danger" id="btn-reject-user">拒绝</button>
+          <button class="btn btn-success" id="btn-approve-user">通过</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 修改权限弹窗 -->
+    <div class="modal-overlay" id="modal-perms">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>修改单位权限</h3>
+          <button class="modal-close" data-close="modal-perms">&times;</button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" id="perms-user-id">
+          <p id="perms-user-info" style="margin-bottom:16px;"></p>
+          <div class="form-group">
+            <label>单位权限</label>
+            <div class="unit-checkbox-list" id="perms-unit-list"></div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" data-close="modal-perms">取消</button>
+          <button class="btn btn-primary" id="btn-save-perms">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 修改密码 -->
+    <div class="modal-overlay" id="modal-pwd">
+      <div class="modal" style="max-width:420px;">
+        <div class="modal-header">
+          <h3>修改密码</h3>
+          <button class="modal-close" data-close="modal-pwd">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group"><label>旧密码</label><input type="password" id="pwd-old" class="form-control"></div>
+          <div class="form-group"><label>新密码</label><input type="password" id="pwd-new" class="form-control" minlength="6"></div>
+          <div class="form-group"><label>确认新密码</label><input type="password" id="pwd-new2" class="form-control"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" data-close="modal-pwd">取消</button>
+          <button class="btn btn-primary" id="btn-save-pwd">确认修改</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 管理员重置密码 -->
+    <div class="modal-overlay" id="modal-reset-pwd">
+      <div class="modal" style="max-width:420px;">
+        <div class="modal-header">
+          <h3>重置用户密码</h3>
+          <button class="modal-close" data-close="modal-reset-pwd">&times;</button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" id="reset-pwd-user-id">
+          <p id="reset-pwd-info" style="margin-bottom:12px;"></p>
+          <div class="form-group"><label>新密码</label><input type="password" id="reset-pwd-value" class="form-control" minlength="6"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" data-close="modal-reset-pwd">取消</button>
+          <button class="btn btn-primary" id="btn-do-reset-pwd">重置</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 附件管理弹窗 -->
+    <div class="modal-overlay" id="modal-attach">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>证明材料 (附件)</h3>
+          <button class="modal-close" data-close="modal-attach">&times;</button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" id="attach-task-id">
+          <div id="attach-list" class="mb-16"></div>
+          <div class="upload-area" id="attach-upload-area">
+            <p>点击或拖拽文件到此处上传</p>
+            <p class="text-muted" style="font-size:12px;">支持任意格式，单文件最大 50MB</p>
+            <input type="file" id="attach-file-input" multiple>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" data-close="modal-attach">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Excel导入弹窗 -->
+    <div class="modal-overlay" id="modal-import">
+      <div class="modal" style="max-width:480px;">
+        <div class="modal-header">
+          <h3>导入 Excel</h3>
+          <button class="modal-close" data-close="modal-import">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="text-muted mb-16" style="font-size:13px;">
+            支持导入督办单.xlsx格式，表头需包含：编号、责任主体、工作任务、牵头领导、责任人、要求完成日期。
+            系统会自动查找表头行。
+          </p>
+          <div class="upload-area" id="import-upload-area">
+            <p>点击选择 Excel 文件</p>
+            <input type="file" id="import-file-input" accept=".xlsx,.xls">
+          </div>
+          <div id="import-result" class="mt-16 hidden"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" data-close="modal-import">关闭</button>
+          <button class="btn btn-primary" id="btn-do-import" disabled>开始导入</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 编辑进度弹窗(普通用户) -->
+    <div class="modal-overlay" id="modal-progress">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>更新进度</h3>
+          <button class="modal-close" data-close="modal-progress">&times;</button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" id="progress-task-id">
+          <div class="form-group"><label>进度情况</label><textarea id="progress-text" class="form-control" rows="3"></textarea></div>
+          <div class="form-group"><label>是否完成</label>
+            <select id="progress-status" class="form-control">
+              <option value="推进中">推进中</option>
+              <option value="已完成">已完成</option>
+              <option value="已超期">已超期</option>
+              <option value="已终止">已终止</option>
+            </select>
+          </div>
+          <div class="form-group"><label>遇到堵点</label><textarea id="progress-blockers" class="form-control" rows="2"></textarea></div>
+          <div class="form-group"><label>需要领导协调解决的事项</label><textarea id="progress-coord" class="form-control" rows="2"></textarea></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" data-close="modal-progress">取消</button>
+          <button class="btn btn-primary" id="btn-save-progress">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 新增单位弹窗 -->
+    <div class="modal-overlay" id="modal-unit">
+      <div class="modal" style="max-width:420px;">
+        <div class="modal-header">
+          <h3 id="modal-unit-title">新增单位</h3>
+          <button class="modal-close" data-close="modal-unit">&times;</button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" id="unit-edit-id">
+          <div class="form-group"><label>单位名称 <span class="required">*</span></label><input type="text" id="unit-name" class="form-control"></div>
+          <div class="form-group"><label>排序号</label><input type="number" id="unit-sort" class="form-control" value="0"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" data-close="modal-unit">取消</button>
+          <button class="btn btn-primary" id="btn-save-unit">保存</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Toast 容器 -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

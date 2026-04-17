@@ -40,6 +40,89 @@ fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 const app = express();
 let pool; // MySQL 连接池
 
+// ─── 安全加固 ─────────────────────────────────────────
+app.disable('x-powered-by');
+
+// 安全响应头
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self';");
+  next();
+});
+
+// ─── 登录频率限制（内存存储）──────────────────────────────
+const LOGIN_MAX_ATTEMPTS = 5;         // 最大失败次数
+const LOGIN_WINDOW_MS = 5 * 60 * 1000;  // 5 分钟窗口
+const LOGIN_LOCK_MS = 15 * 60 * 1000;   // 锁定 15 分钟
+
+// { key -> { count, firstAttempt, lockedUntil } }
+const loginAttempts = new Map();
+
+function getClientIp(req) {
+  return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || req.connection.remoteAddress;
+}
+
+function checkRateLimit(key) {
+  const record = loginAttempts.get(key);
+  if (!record) return { allowed: true };
+  const now = Date.now();
+  // 锁定中
+  if (record.lockedUntil && now < record.lockedUntil) {
+    const remainSec = Math.ceil((record.lockedUntil - now) / 1000);
+    return { allowed: false, remainSec };
+  }
+  // 窗口过期，重置
+  if (now - record.firstAttempt > LOGIN_WINDOW_MS) {
+    loginAttempts.delete(key);
+    return { allowed: true };
+  }
+  // 超过次数
+  if (record.count >= LOGIN_MAX_ATTEMPTS) {
+    record.lockedUntil = now + LOGIN_LOCK_MS;
+    const remainSec = Math.ceil(LOGIN_LOCK_MS / 1000);
+    return { allowed: false, remainSec };
+  }
+  return { allowed: true };
+}
+
+function recordFailedLogin(key) {
+  const now = Date.now();
+  const record = loginAttempts.get(key);
+  if (!record || now - record.firstAttempt > LOGIN_WINDOW_MS) {
+    loginAttempts.set(key, { count: 1, firstAttempt: now, lockedUntil: null });
+  } else {
+    record.count++;
+  }
+}
+
+function clearLoginAttempts(key) {
+  loginAttempts.delete(key);
+}
+
+// 定期清理过期记录（每 10 分钟）
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, record] of loginAttempts) {
+    if (now - record.firstAttempt > LOGIN_WINDOW_MS + LOGIN_LOCK_MS) {
+      loginAttempts.delete(key);
+    }
+  }
+}, 10 * 60 * 1000);
+
+// ─── 密码策略 ─────────────────────────────────────────
+function validatePassword(password) {
+  if (password.length < 8) return '密码不能少于8位。';
+  if (!/[a-zA-Z]/.test(password)) return '密码必须包含字母。';
+  if (!/[0-9]/.test(password)) return '密码必须包含数字。';
+  return null;
+}
+
+// ─── Token 过期配置 ────────────────────────────────────
+const TOKEN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 天
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -104,14 +187,31 @@ async function initDatabase() {
   console.log('MySQL 连接成功');
   conn.release();
 
+  // 确保 force_password_change 列存在
+  try {
+    await pool.execute("ALTER TABLE users ADD COLUMN force_password_change TINYINT(1) DEFAULT 0");
+    console.log('已添加 force_password_change 列');
+  } catch (e) {
+    if (!e.message.includes('Duplicate column')) console.error('ALTER TABLE 错误:', e.message);
+  }
+
   const [admins] = await pool.execute('SELECT id FROM users WHERE username = ?', [DEFAULT_ADMIN.username]);
   if (admins.length === 0) {
     const hash = await bcrypt.hash(DEFAULT_ADMIN.password, BCRYPT_ROUNDS);
     await pool.execute(
-      'INSERT INTO users (username, password_hash, name, role, status, approved_at) VALUES (?, ?, ?, ?, ?, ?)',
-      [DEFAULT_ADMIN.username, hash, DEFAULT_ADMIN.name, 'admin', 'approved', now()]
+      'INSERT INTO users (username, password_hash, name, role, status, approved_at, force_password_change) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [DEFAULT_ADMIN.username, hash, DEFAULT_ADMIN.name, 'admin', 'approved', now(), 1]
     );
     console.log(`默认管理员已创建: ${DEFAULT_ADMIN.username} / ${DEFAULT_ADMIN.password}`);
+  } else {
+    // 如果 admin 仍用默认密码，标记强制改密
+    const [adminUser] = await pool.execute('SELECT * FROM users WHERE username = ?', [DEFAULT_ADMIN.username]);
+    if (adminUser.length > 0) {
+      const isDefault = await bcrypt.compare(DEFAULT_ADMIN.password, adminUser[0].password_hash);
+      if (isDefault) {
+        await pool.execute('UPDATE users SET force_password_change = 1 WHERE id = ?', [adminUser[0].id]);
+      }
+    }
   }
 }
 
@@ -122,10 +222,23 @@ async function authenticate(req, res, next) {
   if (!token) return res.status(401).json({ message: '未登录或登录已过期。' });
 
   try {
-    const [sessions] = await pool.execute('SELECT user_id FROM sessions WHERE token = ?', [token]);
+    const [sessions] = await pool.execute('SELECT user_id, created_at FROM sessions WHERE token = ?', [token]);
     if (sessions.length === 0) return res.status(401).json({ message: '会话无效，请重新登录。' });
 
-    const userId = sessions[0].user_id;
+    // Token 过期检查
+    const session = sessions[0];
+    const sessionAge = Date.now() - new Date(session.created_at).getTime();
+    if (sessionAge > TOKEN_MAX_AGE_MS) {
+      await pool.execute('DELETE FROM sessions WHERE token = ?', [token]);
+      return res.status(401).json({ message: '登录已过期，请重新登录。' });
+    }
+
+    // 活跃续期：如果已过一半时间，刷新 created_at
+    if (sessionAge > TOKEN_MAX_AGE_MS / 2) {
+      await pool.execute('UPDATE sessions SET created_at = ? WHERE token = ?', [now(), token]);
+    }
+
+    const userId = session.user_id;
     const [users] = await pool.execute('SELECT * FROM users WHERE id = ?', [userId]);
     if (users.length === 0) return res.status(401).json({ message: '用户不存在。' });
 
@@ -154,7 +267,8 @@ function safeUser(u) {
     id: u.id, username: u.username, name: u.name, phone: u.phone || '',
     unit: u.unit || '', role: u.role, status: u.status,
     created_at: u.created_at, approved_at: u.approved_at,
-    unitPermissions: u.unitPermissions || []
+    unitPermissions: u.unitPermissions || [],
+    forcePasswordChange: u.force_password_change === 1 || u.force_password_change === true
   };
 }
 
@@ -187,9 +301,8 @@ app.post('/api/auth/register', async (req, res) => {
     if (!name || !username || !password || !unit) {
       return res.status(400).json({ message: '姓名、用户名、密码、单位不能为空。' });
     }
-    if (password.length < 6) {
-      return res.status(400).json({ message: '密码不能少于6位。' });
-    }
+    const pwdError = validatePassword(password);
+    if (pwdError) return res.status(400).json({ message: pwdError });
     const [existing] = await pool.execute('SELECT id FROM users WHERE username = ?', [username]);
     if (existing.length > 0) return res.status(400).json({ message: '该用户名已存在。' });
 
@@ -209,12 +322,39 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const username = String(req.body.username || '').trim();
     const password = String(req.body.password || '');
+    const clientIp = getClientIp(req);
+
+    // 频率限制：按 IP 和 用户名 双重检查
+    const ipKey = `ip:${clientIp}`;
+    const userKey = `user:${username}`;
+
+    const ipCheck = checkRateLimit(ipKey);
+    if (!ipCheck.allowed) {
+      return res.status(429).json({ message: `操作过于频繁，请 ${Math.ceil(ipCheck.remainSec / 60)} 分钟后再试。` });
+    }
+    const userCheck = checkRateLimit(userKey);
+    if (!userCheck.allowed) {
+      return res.status(429).json({ message: `该账号已被临时锁定，请 ${Math.ceil(userCheck.remainSec / 60)} 分钟后再试。` });
+    }
+
     const [users] = await pool.execute('SELECT * FROM users WHERE username = ?', [username]);
-    if (users.length === 0) return res.status(400).json({ message: '用户名或密码错误。' });
+    if (users.length === 0) {
+      recordFailedLogin(ipKey);
+      recordFailedLogin(userKey);
+      return res.status(400).json({ message: '用户名或密码错误。' });
+    }
 
     const user = users[0];
     const match = await bcrypt.compare(password, user.password_hash);
-    if (!match) return res.status(400).json({ message: '用户名或密码错误。' });
+    if (!match) {
+      recordFailedLogin(ipKey);
+      recordFailedLogin(userKey);
+      return res.status(400).json({ message: '用户名或密码错误。' });
+    }
+
+    // 登录成功，清除失败记录
+    clearLoginAttempts(ipKey);
+    clearLoginAttempts(userKey);
 
     if (user.status === 'pending') return res.status(403).json({ message: '账号等待管理员审核中。' });
     if (user.status === 'rejected') return res.status(403).json({ message: '账号未通过审核，请联系管理员。' });
@@ -227,7 +367,7 @@ app.post('/api/auth/login', async (req, res) => {
     const [perms] = await pool.execute('SELECT unit_name FROM user_unit_permissions WHERE user_id = ?', [user.id]);
     user.unitPermissions = perms.map(p => p.unit_name);
 
-    await logAction(user.id, user.username, '登录', 'user', user.id, '');
+    await logAction(user.id, user.username, '登录', 'user', user.id, `IP: ${clientIp}`);
     res.json({ token, user: safeUser(user) });
   } catch (err) {
     console.error('登录失败:', err);
@@ -249,13 +389,14 @@ app.post('/api/auth/change-password', authenticate, async (req, res) => {
     const oldPassword = String(req.body.oldPassword || '');
     const newPassword = String(req.body.newPassword || '');
     if (!oldPassword || !newPassword) return res.status(400).json({ message: '请填写旧密码和新密码。' });
-    if (newPassword.length < 6) return res.status(400).json({ message: '新密码不能少于6位。' });
+    const pwdError = validatePassword(newPassword);
+    if (pwdError) return res.status(400).json({ message: pwdError });
 
     const match = await bcrypt.compare(oldPassword, req.user.password_hash);
     if (!match) return res.status(400).json({ message: '旧密码错误。' });
 
     const hash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
-    await pool.execute('UPDATE users SET password_hash=? WHERE id=?', [hash, req.user.id]);
+    await pool.execute('UPDATE users SET password_hash=?, force_password_change=0 WHERE id=?', [hash, req.user.id]);
     res.json({ ok: true, message: '密码修改成功。' });
   } catch (err) {
     res.status(500).json({ message: '操作失败。' });
@@ -397,7 +538,9 @@ app.post('/api/admin/users/:userId/permissions', authenticate, requireAdmin, asy
 app.post('/api/admin/users/:userId/reset-password', authenticate, requireAdmin, async (req, res) => {
   try {
     const newPassword = String(req.body.password || '').trim();
-    if (!newPassword || newPassword.length < 6) return res.status(400).json({ message: '新密码不能少于6位。' });
+    const pwdError = validatePassword(newPassword);
+    if (!newPassword) return res.status(400).json({ message: '新密码不能为空。' });
+    if (pwdError) return res.status(400).json({ message: pwdError });
     const hash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
     await pool.execute('UPDATE users SET password_hash=? WHERE id=?', [hash, req.params.userId]);
     await logAction(req.user.id, req.user.username, '重置密码', 'user', req.params.userId, '');
@@ -978,6 +1121,15 @@ app.use((_req, res) => {
 async function start() {
   try {
     await initDatabase();
+
+    // 定期清理过期 session（每小时）
+    setInterval(async () => {
+      try {
+        const expiry = new Date(Date.now() - TOKEN_MAX_AGE_MS).toISOString().slice(0, 19).replace('T', ' ');
+        await pool.execute('DELETE FROM sessions WHERE created_at < ?', [expiry]);
+      } catch (e) { console.error('清理过期session失败:', e.message); }
+    }, 60 * 60 * 1000);
+
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`督办管理系统已启动: http://0.0.0.0:${PORT}`);
       console.log(`默认管理员: ${DEFAULT_ADMIN.username} / ${DEFAULT_ADMIN.password}`);

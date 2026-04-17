@@ -87,11 +87,18 @@
   // close on backdrop click
   $$('.modal-overlay').forEach(ov => {
     ov.addEventListener('click', e => {
-      if (e.target === ov) closeModal(ov.id);
+      if (e.target === ov) {
+        if (ov._forceMode) { toast('请先修改密码', 'error'); return; }
+        closeModal(ov.id);
+      }
     });
   });
   $$('[data-close]').forEach(btn => {
-    btn.addEventListener('click', () => closeModal(btn.dataset.close));
+    btn.addEventListener('click', () => {
+      const modal = $('#' + btn.dataset.close);
+      if (modal && modal._forceMode) { toast('请先修改密码', 'error'); return; }
+      closeModal(btn.dataset.close);
+    });
   });
 
   // ─── HTML escape ────────────────────────────────────
@@ -161,6 +168,10 @@
       const data = await api('GET', '/api/auth/me');
       S.user = data.user;
       showMain();
+      if (S.user.forcePasswordChange) {
+        toast('您需要修改默认密码后才能继续使用系统', 'error');
+        setTimeout(() => openForceChangePwd(), 300);
+      }
     } catch {
       S.token = '';
       localStorage.removeItem('sv_token');
@@ -173,8 +184,18 @@
     S.token = data.token;
     S.user = data.user;
     localStorage.setItem('sv_token', S.token);
-    showMain();
-    toast('登录成功', 'success');
+
+    // 强制改密检查
+    if (S.user.forcePasswordChange) {
+      showMain();
+      toast('您需要修改默认密码后才能继续使用系统', 'error');
+      setTimeout(() => {
+        openForceChangePwd();
+      }, 300);
+    } else {
+      showMain();
+      toast('登录成功', 'success');
+    }
   }
 
   function logout() {
@@ -1005,7 +1026,9 @@
   async function doResetPwd() {
     const userId = $('#reset-pwd-user-id').value;
     const pwd = $('#reset-pwd-value').value;
-    if (!pwd || pwd.length < 6) { toast('密码不能少于6位', 'error'); return; }
+    if (!pwd || pwd.length < 8 || !/[a-zA-Z]/.test(pwd) || !/[0-9]/.test(pwd)) {
+      toast('密码至少8位，且必须包含字母和数字', 'error'); return;
+    }
     try {
       await api('POST', '/api/admin/users/' + userId + '/reset-password', { password: pwd });
       toast('密码已重置', 'success');
@@ -1135,16 +1158,32 @@
     }
   }
 
+  // ─── Force Change Password ──────────────────────────
+  function openForceChangePwd() {
+    $('#pwd-old').value = '';
+    $('#pwd-new').value = '';
+    $('#pwd-new2').value = '';
+    openModal('modal-pwd');
+    // 阻止关闭：移除backdrop点击关闭和关闭按钮
+    const overlay = $('#modal-pwd');
+    overlay._forceMode = true;
+  }
+
   // ─── Change Password ───────────────────────────────
   async function changePwd() {
     const oldPwd = $('#pwd-old').value;
     const newPwd = $('#pwd-new').value;
     const newPwd2 = $('#pwd-new2').value;
     if (!oldPwd || !newPwd) { toast('请填写旧密码和新密码', 'error'); return; }
-    if (newPwd.length < 6) { toast('新密码不能少于6位', 'error'); return; }
+    if (newPwd.length < 8 || !/[a-zA-Z]/.test(newPwd) || !/[0-9]/.test(newPwd)) {
+      toast('新密码至少8位，且必须包含字母和数字', 'error'); return;
+    }
     if (newPwd !== newPwd2) { toast('两次输入的新密码不一致', 'error'); return; }
     try {
       await api('POST', '/api/auth/change-password', { oldPassword: oldPwd, newPassword: newPwd });
+      S.user.forcePasswordChange = false;
+      const overlay = $('#modal-pwd');
+      overlay._forceMode = false;
       toast('密码修改成功', 'success');
       closeModal('modal-pwd');
       $('#pwd-old').value = '';
@@ -1176,6 +1215,9 @@
       const pwd = $('#reg-password').value;
       const pwd2 = $('#reg-password2').value;
       if (pwd !== pwd2) { toast('两次密码不一致', 'error'); return; }
+      if (pwd.length < 8 || !/[a-zA-Z]/.test(pwd) || !/[0-9]/.test(pwd)) {
+        toast('密码至少8位，且必须包含字母和数字', 'error'); return;
+      }
       try {
         await api('POST', '/api/auth/register', {
           name: $('#reg-name').value.trim(),

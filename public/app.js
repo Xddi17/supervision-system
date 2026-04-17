@@ -67,6 +67,20 @@
   }
 
   // ─── Modal helpers ──────────────────────────────────
+
+  // ─── Mobile sidebar ────────────────────────────────
+  function toggleMobileSidebar() {
+    const sb = $('#sidebar');
+    const ov = $('#sidebar-overlay');
+    sb.classList.toggle('open');
+    ov.classList.toggle('open');
+  }
+  function closeMobileSidebar() {
+    $('#sidebar').classList.remove('open');
+    $('#sidebar-overlay').classList.remove('open');
+  }
+
+  // ─── Modal helpers (cont) ─────────────────────────
   function openModal(id) { $('#' + id).classList.add('open'); }
   function closeModal(id) { $('#' + id).classList.remove('open'); }
 
@@ -92,6 +106,10 @@
     const map = {
       '已完成': 'badge-success',
       '推进中': 'badge-warning',
+      '临期': 'badge-orange',
+      '超期': 'badge-danger',
+      '终止': 'badge-gray',
+      // 兼容旧数据
       '已超期': 'badge-danger',
       '已终止': 'badge-gray',
     };
@@ -313,7 +331,7 @@
       // render a <select>
       const sel = document.createElement('select');
       sel.className = 'inline-input';
-      ['推进中', '已完成', '已超期', '已终止'].forEach(opt => {
+      ['推进中', '临期', '超期', '终止', '已完成'].forEach(opt => {
         const o = document.createElement('option');
         o.value = opt;
         o.textContent = opt;
@@ -678,7 +696,7 @@
   }
 
   // ─── Stats ──────────────────────────────────────────
-  let chartStatus, chartUnit, chartUnitStatus;
+  let chartStatus, chartUnitStatus;
 
   async function loadStats() {
     try {
@@ -694,7 +712,7 @@
         <div class="stat-card"><div class="stat-value">${total}</div><div class="stat-label">任务总数</div></div>
         <div class="stat-card success"><div class="stat-value">${data.completed}</div><div class="stat-label">已完成</div></div>
         <div class="stat-card warning"><div class="stat-value">${data.inProgress}</div><div class="stat-label">推进中</div></div>
-        <div class="stat-card danger"><div class="stat-value">${data.overdue}</div><div class="stat-label">已超期</div></div>
+        <div class="stat-card danger"><div class="stat-value">${data.overdue}</div><div class="stat-label">超期</div></div>
         <div class="stat-card info"><div class="stat-value">${rate}%</div><div class="stat-label">完成率</div></div>
       `;
 
@@ -702,7 +720,11 @@
       const byStatus = data.byStatus || [];
       const statusLabels = byStatus.map(r => r.status);
       const statusData = byStatus.map(r => r.cnt);
-      const statusColors = statusLabels.map(s => ({ '已完成': '#22c55e', '推进中': '#f59e0b', '已超期': '#ef4444', '已终止': '#9ca3af' }[s] || '#6b7280'));
+      const statusColors = statusLabels.map(s => ({
+        '已完成': '#22c55e', '推进中': '#3b82f6', '临期': '#f59e0b',
+        '超期': '#ef4444', '终止': '#9ca3af',
+        '已超期': '#ef4444', '已终止': '#9ca3af'
+      }[s] || '#6b7280'));
 
       if (chartStatus) chartStatus.destroy();
       chartStatus = new Chart($('#chart-status').getContext('2d'), {
@@ -711,46 +733,69 @@
         options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
       });
 
-      // Unit chart
-      const byUnit = data.byUnit || [];
-      const unitLabels = byUnit.map(r => r.unit);
-      const unitData = byUnit.map(r => r.total);
-      const palette = ['#3b82f6', '#ef4444', '#f59e0b', '#22c55e', '#8b5cf6', '#06b6d4', '#f97316', '#ec4899', '#14b8a6', '#6366f1'];
+      // Unit completion rate chart - count all tasks per unit
+      const allTasks = taskData.tasks || [];
+      const today = new Date(); today.setHours(0,0,0,0);
 
-      if (chartUnit) chartUnit.destroy();
-      chartUnit = new Chart($('#chart-unit').getContext('2d'), {
-        type: 'pie',
-        data: { labels: unitLabels, datasets: [{ data: unitData, backgroundColor: palette.slice(0, unitLabels.length), borderWidth: 2, borderColor: '#fff' }] },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
+      // Build per-unit stats: all tasks
+      const unitMap = {};
+      allTasks.forEach(t => {
+        const unit = t.responsible_unit;
+        if (!unit) return;
+        if (!unitMap[unit]) unitMap[unit] = { total: 0, completed: 0 };
+        unitMap[unit].total++;
+        if (t.completion_status === '已完成') unitMap[unit].completed++;
       });
 
-      // Unit status chart
+      const unitEntries = Object.entries(unitMap).filter(([, v]) => v.total > 0);
+      unitEntries.sort((a, b) => {
+        const rateA = a[1].total > 0 ? a[1].completed / a[1].total : 0;
+        const rateB = b[1].total > 0 ? b[1].completed / b[1].total : 0;
+        return rateB - rateA;
+      });
+
+      const unitLabels = unitEntries.map(([u]) => u);
+      const unitRates = unitEntries.map(([, v]) => v.total > 0 ? Math.round((v.completed / v.total) * 100) : 0);
+      const unitCompleted = unitEntries.map(([, v]) => v.completed);
+      const unitTotals = unitEntries.map(([, v]) => v.total);
+
       if (chartUnitStatus) chartUnitStatus.destroy();
       chartUnitStatus = new Chart($('#chart-unit-status').getContext('2d'), {
         type: 'bar',
         data: {
           labels: unitLabels,
-          datasets: [
-            { label: '已完成', data: byUnit.map(r => r.completed), backgroundColor: '#22c55e' },
-            { label: '推进中', data: byUnit.map(r => r.inProgress), backgroundColor: '#f59e0b' },
-            { label: '已超期', data: byUnit.map(r => r.overdue), backgroundColor: '#ef4444' },
-            { label: '已终止', data: byUnit.map(r => r.terminated), backgroundColor: '#9ca3af' },
-          ]
+          datasets: [{
+            label: '完成率(%)',
+            data: unitRates,
+            backgroundColor: unitRates.map(r => r >= 80 ? '#22c55e' : r >= 50 ? '#f59e0b' : '#ef4444'),
+            borderWidth: 0,
+            borderRadius: 4,
+          }]
         },
         options: {
           responsive: true, maintainAspectRatio: false,
-          scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true, ticks: { stepSize: 1 } } },
-          plugins: { legend: { position: 'bottom' } }
+          scales: {
+            y: { beginAtZero: true, max: 100, ticks: { callback: v => v + '%' } }
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: function(ctx) {
+                  const idx = ctx.dataIndex;
+                  return `完成率: ${unitRates[idx]}% (${unitCompleted[idx]}/${unitTotals[idx]})`;
+                }
+              }
+            }
+          }
         }
       });
 
-      // Render tasks grouped by status
-      const allTasks = taskData.tasks || [];
+      // Render tasks grouped by status - approaching, overdue and terminated
       const groups = {
-        inprogress: allTasks.filter(t => (t.completion_status || '推进中') === '推进中'),
-        completed: allTasks.filter(t => t.completion_status === '已完成'),
-        overdue: allTasks.filter(t => t.completion_status === '已超期'),
-        terminated: allTasks.filter(t => t.completion_status === '已终止'),
+        approaching: allTasks.filter(t => t.completion_status === '临期'),
+        overdue: allTasks.filter(t => t.completion_status === '超期' || t.completion_status === '已超期'),
+        terminated: allTasks.filter(t => t.completion_status === '终止' || t.completion_status === '已终止'),
       };
 
       Object.entries(groups).forEach(([key, tasks]) => {
@@ -761,7 +806,14 @@
         } else {
           list.innerHTML = `<table class="stats-mini-table">
             <thead><tr>
-              <th>责任主体</th><th>工作任务</th><th>牵头领导</th><th>责任人</th><th>完成日期</th><th>进度情况</th>
+              <th style="min-width:80px;">责任主体</th>
+              <th style="min-width:160px;">工作任务</th>
+              <th style="min-width:70px;">牵头领导</th>
+              <th style="min-width:70px;">责任人</th>
+              <th style="min-width:90px;">完成日期</th>
+              <th style="min-width:200px;">进度情况</th>
+              <th style="min-width:160px;">遇到堵点</th>
+              <th style="min-width:160px;">需领导协调事项</th>
             </tr></thead>
             <tbody>${tasks.map(t => `<tr>
               <td>${esc(t.responsible_unit)}</td>
@@ -769,7 +821,9 @@
               <td>${esc(t.lead_leader)}</td>
               <td>${esc(t.responsible_person)}</td>
               <td>${formatDate(t.deadline)}</td>
-              <td style="white-space:pre-wrap;">${esc(t.progress) || ''}</td>
+              <td style="white-space:pre-wrap;text-align:left;">${esc(t.progress) || ''}</td>
+              <td style="white-space:pre-wrap;text-align:left;">${esc(t.blockers) || ''}</td>
+              <td style="white-space:pre-wrap;text-align:left;">${esc(t.coordination) || ''}</td>
             </tr>`).join('')}</tbody>
           </table>`;
         }
@@ -1142,8 +1196,16 @@
 
     // Navigation
     $$('.sidebar .nav-item').forEach(item => {
-      item.addEventListener('click', () => navigateTo(item.dataset.page));
+      item.addEventListener('click', () => {
+        navigateTo(item.dataset.page);
+        // Close sidebar on mobile after navigation
+        closeMobileSidebar();
+      });
     });
+
+    // Mobile sidebar toggle
+    $('#btn-hamburger').addEventListener('click', toggleMobileSidebar);
+    $('#sidebar-overlay').addEventListener('click', closeMobileSidebar);
 
     // Tasks
     $('#btn-add-task').addEventListener('click', () => openTaskModal(null));

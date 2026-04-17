@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>督办管理系统</title>
   <link rel="stylesheet" href="styles.css">
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="/node_modules/chart.js/dist/chart.umd.js"></script>
 </head>
 <body>
   <div id="app">
@@ -75,7 +75,10 @@
 
       <!-- 顶栏 -->
       <div class="top-bar">
-        <div class="logo">督办管理系统</div>
+        <div style="display:flex;align-items:center;gap:12px;">
+          <button class="btn-hamburger" id="btn-hamburger" aria-label="菜单">&#9776;</button>
+          <div class="logo">督办管理系统</div>
+        </div>
         <div class="user-area">
           <span class="user-name" id="topbar-user"></span>
           <button class="btn btn-sm btn-ghost" style="color:#fff;" id="btn-change-pwd">修改密码</button>
@@ -107,6 +110,7 @@
             <span class="nav-icon">&#9998;</span> 操作日志
           </div>
         </nav>
+        <div class="sidebar-overlay" id="sidebar-overlay"></div>
 
         <!-- 主内容区 -->
         <main class="content-area">
@@ -145,10 +149,11 @@
                   <label>完成状态</label>
                   <select id="filter-status" class="form-control">
                     <option value="">全部</option>
-                    <option value="已完成">已完成</option>
                     <option value="推进中">推进中</option>
-                    <option value="已超期">已超期</option>
-                    <option value="已终止">已终止</option>
+                    <option value="临期">临期</option>
+                    <option value="超期">超期</option>
+                    <option value="终止">终止</option>
+                    <option value="已完成">已完成</option>
                   </select>
                 </div>
                 <div class="filter-item">
@@ -196,36 +201,28 @@
             <div class="stat-grid" id="stats-overview"></div>
             <div class="chart-grid">
               <div class="chart-card"><h4>完成状态分布</h4><canvas id="chart-status"></canvas></div>
-              <div class="chart-card"><h4>责任主体分布</h4><canvas id="chart-unit"></canvas></div>
-              <div class="chart-card full-width"><h4>各单位完成情况</h4><canvas id="chart-unit-status"></canvas></div>
+              <div class="chart-card"><h4>各单位完成率</h4><canvas id="chart-unit-status"></canvas></div>
             </div>
 
-            <!-- 按状态分类的任务列表 -->
+            <!-- 按状态分类的任务列表（临期、超期和终止） -->
             <div class="stats-task-lists">
-              <div class="stats-status-section" id="stats-section-inprogress">
-                <div class="stats-section-header warning-header" data-toggle="stats-list-inprogress">
-                  <h3>推进中 (<span id="stats-cnt-inprogress">0</span>)</h3>
+              <div class="stats-status-section" id="stats-section-approaching">
+                <div class="stats-section-header orange-header" data-toggle="stats-list-approaching">
+                  <h3>临期 (<span id="stats-cnt-approaching">0</span>)</h3>
                   <span class="toggle-icon">&#9660;</span>
                 </div>
-                <div class="stats-task-list" id="stats-list-inprogress"></div>
-              </div>
-              <div class="stats-status-section" id="stats-section-completed">
-                <div class="stats-section-header success-header" data-toggle="stats-list-completed">
-                  <h3>已完成 (<span id="stats-cnt-completed">0</span>)</h3>
-                  <span class="toggle-icon">&#9660;</span>
-                </div>
-                <div class="stats-task-list" id="stats-list-completed"></div>
+                <div class="stats-task-list" id="stats-list-approaching"></div>
               </div>
               <div class="stats-status-section" id="stats-section-overdue">
                 <div class="stats-section-header danger-header" data-toggle="stats-list-overdue">
-                  <h3>已超期 (<span id="stats-cnt-overdue">0</span>)</h3>
+                  <h3>超期 (<span id="stats-cnt-overdue">0</span>)</h3>
                   <span class="toggle-icon">&#9660;</span>
                 </div>
                 <div class="stats-task-list" id="stats-list-overdue"></div>
               </div>
               <div class="stats-status-section" id="stats-section-terminated">
                 <div class="stats-section-header gray-header" data-toggle="stats-list-terminated">
-                  <h3>已终止 (<span id="stats-cnt-terminated">0</span>)</h3>
+                  <h3>终止 (<span id="stats-cnt-terminated">0</span>)</h3>
                   <span class="toggle-icon">&#9660;</span>
                 </div>
                 <div class="stats-task-list" id="stats-list-terminated"></div>
@@ -334,9 +331,10 @@
             <div class="form-group"><label>是否完成</label>
               <select id="task-status" class="form-control">
                 <option value="推进中">推进中</option>
+                <option value="临期">临期</option>
+                <option value="超期">超期</option>
+                <option value="终止">终止</option>
                 <option value="已完成">已完成</option>
-                <option value="已超期">已超期</option>
-                <option value="已终止">已终止</option>
               </select>
             </div>
           </div>
@@ -493,9 +491,10 @@
           <div class="form-group"><label>是否完成</label>
             <select id="progress-status" class="form-control">
               <option value="推进中">推进中</option>
+              <option value="临期">临期</option>
+              <option value="超期">超期</option>
+              <option value="终止">终止</option>
               <option value="已完成">已完成</option>
-              <option value="已超期">已超期</option>
-              <option value="已终止">已终止</option>
             </select>
           </div>
           <div class="form-group"><label>遇到堵点</label><textarea id="progress-blockers" class="form-control" rows="2"></textarea></div>

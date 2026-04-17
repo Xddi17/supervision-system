@@ -43,6 +43,7 @@ let pool; // MySQL 连接池
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
+app.use('/node_modules', express.static(path.join(__dirname, 'node_modules')));
 app.use('/uploads', express.static(UPLOAD_DIR));
 
 // multer 配置

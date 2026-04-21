@@ -462,6 +462,7 @@ tbody tr:hover { background-color: #e3f2fd; }
 }
 
 .badge-success { background: rgba(34,197,94,.12); color: var(--success-dark); }
+.badge-success-light { background: rgba(34,197,94,.08); color: #15803d; border: 1px dashed #86efac; }
 .badge-warning { background: rgba(245,158,11,.12); color: var(--warning-dark); }
 .badge-danger  { background: rgba(239,68,68,.12); color: var(--danger-dark); }
 .badge-orange  { background: rgba(249,115,22,.12); color: #c2410c; }

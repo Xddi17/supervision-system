@@ -10,6 +10,7 @@ const multer = require('multer');
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
 const XLSX = require('xlsx');
+const docx = require('docx');
 
 // ─── 配置 ───────────────────────────────────────────
 const PORT = Number(process.env.PORT || 3000);
@@ -1008,13 +1009,13 @@ app.get('/api/stats', authenticate, async (req, res) => {
     }
 
     const [totalRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}`, params);
-    const [completedRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} completion_status = '已完成'`, params);
+    const [completedRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} (completion_status = '已完成' OR completion_status = '预完成')`, params);
     const [inProgressRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} completion_status = '推进中'`, params);
-    const [overdueRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} deadline < CURDATE() AND completion_status != '已完成'`, params);
+    const [overdueRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} deadline < CURDATE() AND completion_status != '已完成' AND completion_status != '预完成'`, params);
 
     const [byUnit] = await pool.execute(
       `SELECT responsible_unit as unit, COUNT(*) as total,
-        SUM(CASE WHEN completion_status='已完成' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN completion_status='已完成' OR completion_status='预完成' THEN 1 ELSE 0 END) as completed,
         SUM(CASE WHEN completion_status='已超期' THEN 1 ELSE 0 END) as overdue,
         SUM(CASE WHEN completion_status='推进中' THEN 1 ELSE 0 END) as \`inProgress\`,
         SUM(CASE WHEN completion_status='已终止' THEN 1 ELSE 0 END) as \`terminated\`
@@ -1023,7 +1024,18 @@ app.get('/api/stats', authenticate, async (req, res) => {
     );
 
     const [byStatus] = await pool.execute(
-      `SELECT completion_status as status, COUNT(*) as cnt FROM supervision_tasks${whereClause} GROUP BY completion_status`,
+      `SELECT
+         CASE
+           WHEN completion_status = '预完成' THEN '已完成'
+           ELSE completion_status
+         END as status,
+         COUNT(*) as cnt
+       FROM supervision_tasks${whereClause}
+       GROUP BY
+         CASE
+           WHEN completion_status = '预完成' THEN '已完成'
+           ELSE completion_status
+         END`,
       params
     );
 
@@ -1074,9 +1086,9 @@ app.get('/api/dashboard', authenticate, async (req, res) => {
     }
 
     const [totalRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}`, params);
-    const [completedRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} completion_status = '已完成'`, params);
+    const [completedRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} (completion_status = '已完成' OR completion_status = '预完成')`, params);
     const [inProgressRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} completion_status = '推进中'`, params);
-    const [overdueRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} deadline < CURDATE() AND completion_status != '已完成'`, params);
+    const [overdueRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} deadline < CURDATE() AND completion_status != '已完成' AND completion_status != '预完成'`, params);
 
     let pendingUsers = 0;
     if (req.user.role === 'admin') {
@@ -1109,6 +1121,150 @@ app.get('/api/import-batches', authenticate, requireAdmin, async (req, res) => {
     res.json({ batches: rows });
   } catch (err) {
     res.status(500).json({ message: '查询失败。' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════
+//  生成报告（Word 格式 - 督办事项情况通报）
+// ═══════════════════════════════════════════════════════
+app.get('/api/tasks/report', authenticate, async (req, res) => {
+  try {
+    const visibleUnits = await getVisibleUnits(req.user);
+    let sql = 'SELECT * FROM supervision_tasks';
+    const params = [];
+
+    if (visibleUnits !== null) {
+      if (visibleUnits.length === 0) return res.status(400).json({ message: '无可见任务。' });
+      sql += ` WHERE responsible_unit IN (${visibleUnits.map(() => '?').join(',')})`;
+      params.push(...visibleUnits);
+    }
+    sql += ' ORDER BY responsible_unit, created_at';
+
+    const [allTasks] = await pool.execute(sql, params);
+    const tasks = allTasks.filter(t => ['临期', '超期', '已超期', '终止', '已终止'].includes(t.completion_status));
+
+    if (tasks.length === 0) {
+      return res.status(400).json({ message: '当前没有可生成报告的终止、临期或超期事项。' });
+    }
+
+    // Group tasks by responsible_unit
+    const unitGroups = {};
+    for (const t of tasks) {
+      const unit = t.responsible_unit || '未分配';
+      if (!unitGroups[unit]) unitGroups[unit] = [];
+      unitGroups[unit].push(t);
+    }
+
+    // Get unit sort order from units table
+    const [unitRows] = await pool.execute('SELECT name, sort_order FROM units ORDER BY sort_order, id');
+    const unitOrder = {};
+    unitRows.forEach((u, i) => { unitOrder[u.name] = u.sort_order || i; });
+
+    const sortedUnits = Object.keys(unitGroups).sort((a, b) => {
+      const oa = unitOrder[a] !== undefined ? unitOrder[a] : 9999;
+      const ob = unitOrder[b] !== undefined ? unitOrder[b] : 9999;
+      return oa - ob;
+    });
+
+    // Chinese numbering
+    const cnNumbers = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
+      '十一', '十二', '十三', '十四', '十五', '十六', '十七', '十八', '十九', '二十'];
+
+    // Build document children
+    const children = [];
+
+    // Title: 方正小标宋GBK 二号 (22pt)
+    children.push(new docx.Paragraph({
+      alignment: docx.AlignmentType.CENTER,
+      spacing: { after: 400 },
+      children: [
+        new docx.TextRun({
+          text: '督办事项情况通报',
+          font: { name: '方正小标宋_GBK', eastAsia: '方正小标宋_GBK' },
+          size: 44, // 二号 = 22pt = 44 half-points
+          bold: true,
+        })
+      ]
+    }));
+
+    sortedUnits.forEach((unit, unitIdx) => {
+      // Unit heading: 黑体 三号 (16pt)
+      children.push(new docx.Paragraph({
+        spacing: { before: 300, after: 200 },
+        children: [
+          new docx.TextRun({
+            text: `${cnNumbers[unitIdx] || (unitIdx + 1)}、${unit}`,
+            font: { name: '黑体', eastAsia: '黑体' },
+            size: 32, // 三号 = 16pt = 32 half-points
+            bold: true,
+          })
+        ]
+      }));
+
+      const unitTasks = unitGroups[unit];
+      unitTasks.forEach((t, tIdx) => {
+        // Task title: bold, with deadline and status - 仿宋GB2312 三号
+        const statusText = t.completion_status || '推进中';
+        const deadlineStr = t.deadline ? String(t.deadline).slice(0, 10).replace(/-/g, '').replace(/^(\d{4})(\d{2})(\d{2})$/, (_, y, m, d) => `${Number(m)}月${Number(d)}日`) : '';
+        
+        // Build task title text: "序号.任务内容（日期，状态）"
+        let titleText = `${tIdx + 1}.${t.task_content || ''}`;
+        const metaParts = [];
+        if (deadlineStr) metaParts.push(deadlineStr);
+        if (statusText) metaParts.push(statusText);
+        if (metaParts.length > 0) titleText += `（${metaParts.join('，')}）`;
+
+        children.push(new docx.Paragraph({
+          spacing: { before: 100 },
+          indent: { firstLine: 640 }, // 2字符缩进
+          children: [
+            new docx.TextRun({
+              text: titleText,
+              font: { name: '仿宋_GB2312', eastAsia: '仿宋_GB2312' },
+              size: 32,
+              bold: true,
+            })
+          ]
+        }));
+
+        // Progress content: 仿宋GB2312 三号, normal weight
+        if (t.progress) {
+          children.push(new docx.Paragraph({
+            indent: { firstLine: 640 },
+            children: [
+              new docx.TextRun({
+                text: t.progress,
+                font: { name: '仿宋_GB2312', eastAsia: '仿宋_GB2312' },
+                size: 32,
+              })
+            ]
+          }));
+        }
+      });
+    });
+
+    const doc = new docx.Document({
+      sections: [{
+        properties: {
+          page: {
+            margin: { top: 1440, bottom: 1440, left: 1440, right: 1440 },
+          }
+        },
+        children: children,
+      }]
+    });
+
+    const buffer = await docx.Packer.toBuffer(doc);
+
+    const dateStr = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent('督办事项情况通报_' + dateStr + '.docx')}`);
+    res.send(buffer);
+
+    await logAction(req.user.id, req.user.username, '生成报告', 'report', 0, '督办事项情况通报');
+  } catch (err) {
+    console.error('生成报告失败:', err);
+    res.status(500).json({ message: '生成报告失败: ' + err.message });
   }
 });
 

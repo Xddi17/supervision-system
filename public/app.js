@@ -112,6 +112,7 @@
   function statusBadge(status) {
     const map = {
       '已完成': 'badge-success',
+      '预完成': 'badge-success-light',
       '推进中': 'badge-warning',
       '临期': 'badge-orange',
       '超期': 'badge-danger',
@@ -352,7 +353,7 @@
       // render a <select>
       const sel = document.createElement('select');
       sel.className = 'inline-input';
-      ['推进中', '临期', '超期', '终止', '已完成'].forEach(opt => {
+      ['推进中', '临期', '超期', '终止', '预完成', '已完成'].forEach(opt => {
         const o = document.createElement('option');
         o.value = opt;
         o.textContent = opt;
@@ -716,6 +717,26 @@
     }
   }
 
+  async function generateReport() {
+    try {
+      toast('正在生成报告...', '');
+      const h = {};
+      if (S.token) h['Authorization'] = 'Bearer ' + S.token;
+      const res = await fetch('/api/tasks/report', { headers: h });
+      if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.message || '生成失败'); }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = '督办事项情况通报_' + new Date().toISOString().slice(0, 10) + '.docx';
+      a.click();
+      URL.revokeObjectURL(url);
+      toast('报告已生成', 'success');
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
   // ─── Stats ──────────────────────────────────────────
   let chartStatus, chartUnitStatus;
 
@@ -739,8 +760,14 @@
 
       // Status chart
       const byStatus = data.byStatus || [];
-      const statusLabels = byStatus.map(r => r.status);
-      const statusData = byStatus.map(r => r.cnt);
+      const statusOrder = ['已完成', '推进中', '临期', '超期', '终止', '已超期', '已终止'];
+      const statusMap = new Map();
+      byStatus.forEach(r => {
+        const key = r.status === '预完成' ? '已完成' : r.status;
+        statusMap.set(key, (statusMap.get(key) || 0) + Number(r.cnt || 0));
+      });
+      const statusLabels = statusOrder.filter(status => statusMap.has(status));
+      const statusData = statusLabels.map(status => statusMap.get(status));
       const statusColors = statusLabels.map(s => ({
         '已完成': '#22c55e', '推进中': '#3b82f6', '临期': '#f59e0b',
         '超期': '#ef4444', '终止': '#9ca3af',
@@ -765,7 +792,7 @@
         if (!unit) return;
         if (!unitMap[unit]) unitMap[unit] = { total: 0, completed: 0 };
         unitMap[unit].total++;
-        if (t.completion_status === '已完成') unitMap[unit].completed++;
+        if (t.completion_status === '已完成' || t.completion_status === '预完成') unitMap[unit].completed++;
       });
 
       const unitEntries = Object.entries(unitMap).filter(([, v]) => v.total > 0);
@@ -778,17 +805,25 @@
       const unitLabels = unitEntries.map(([u]) => u);
       const unitRates = unitEntries.map(([, v]) => v.total > 0 ? Math.round((v.completed / v.total) * 100) : 0);
       const unitCompleted = unitEntries.map(([, v]) => v.completed);
+      const unitPending = unitEntries.map(([, v]) => v.total - v.completed);
       const unitTotals = unitEntries.map(([, v]) => v.total);
+      const unitLabelWithRate = unitEntries.map(([u], idx) => `${u} (${unitRates[idx]}%)`);
 
       if (chartUnitStatus) chartUnitStatus.destroy();
       chartUnitStatus = new Chart($('#chart-unit-status').getContext('2d'), {
         type: 'bar',
         data: {
-          labels: unitLabels,
+          labels: unitLabelWithRate,
           datasets: [{
-            label: '完成率(%)',
-            data: unitRates,
-            backgroundColor: unitRates.map(r => r >= 80 ? '#22c55e' : r >= 50 ? '#f59e0b' : '#ef4444'),
+            label: '已完成',
+            data: unitCompleted,
+            backgroundColor: '#22c55e',
+            borderWidth: 0,
+            borderRadius: 4,
+          }, {
+            label: '未完成',
+            data: unitPending,
+            backgroundColor: '#3b82f6',
             borderWidth: 0,
             borderRadius: 4,
           }]
@@ -796,15 +831,19 @@
         options: {
           responsive: true, maintainAspectRatio: false,
           scales: {
-            y: { beginAtZero: true, max: 100, ticks: { callback: v => v + '%' } }
+            x: { stacked: true },
+            y: { beginAtZero: true, stacked: true }
           },
           plugins: {
-            legend: { display: false },
+            legend: { display: true, position: 'bottom' },
             tooltip: {
               callbacks: {
                 label: function(ctx) {
                   const idx = ctx.dataIndex;
-                  return `完成率: ${unitRates[idx]}% (${unitCompleted[idx]}/${unitTotals[idx]})`;
+                  if (ctx.dataset.label === '已完成') {
+                    return `已完成: ${unitCompleted[idx]}，完成率: ${unitRates[idx]}%`;
+                  }
+                  return `未完成: ${unitPending[idx]}`;
                 }
               }
             }
@@ -1293,6 +1332,7 @@
     });
     $('#btn-do-import').addEventListener('click', doImport);
     $('#btn-export-excel').addEventListener('click', exportExcel);
+    $('#btn-generate-report').addEventListener('click', generateReport);
 
     // Stats
     $('#btn-refresh-stats').addEventListener('click', loadStats);

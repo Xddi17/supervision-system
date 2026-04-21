@@ -135,6 +135,7 @@
                 <button class="btn btn-primary admin-only hidden" id="btn-add-task">新增任务</button>
                 <button class="btn btn-success admin-only hidden" id="btn-import-excel">导入 Excel</button>
                 <button class="btn btn-outline" id="btn-export-excel">导出 Excel</button>
+                <button class="btn btn-outline" id="btn-generate-report" style="background:#7c3aed;color:#fff;border-color:#7c3aed;">生成报告</button>
               </div>
             </div>
 
@@ -153,6 +154,7 @@
                     <option value="临期">临期</option>
                     <option value="超期">超期</option>
                     <option value="终止">终止</option>
+                    <option value="预完成">预完成</option>
                     <option value="已完成">已完成</option>
                   </select>
                 </div>
@@ -201,7 +203,7 @@
             <div class="stat-grid" id="stats-overview"></div>
             <div class="chart-grid">
               <div class="chart-card"><h4>完成状态分布</h4><canvas id="chart-status"></canvas></div>
-              <div class="chart-card"><h4>各单位完成率</h4><canvas id="chart-unit-status"></canvas></div>
+              <div class="chart-card"><h4>各单位完成情况</h4><canvas id="chart-unit-status"></canvas></div>
             </div>
 
             <!-- 按状态分类的任务列表（临期、超期和终止） -->
@@ -334,6 +336,7 @@
                 <option value="临期">临期</option>
                 <option value="超期">超期</option>
                 <option value="终止">终止</option>
+                <option value="预完成">预完成</option>
                 <option value="已完成">已完成</option>
               </select>
             </div>
@@ -494,6 +497,7 @@
               <option value="临期">临期</option>
               <option value="超期">超期</option>
               <option value="终止">终止</option>
+              <option value="预完成">预完成</option>
               <option value="已完成">已完成</option>
             </select>
           </div>

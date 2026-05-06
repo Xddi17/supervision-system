@@ -129,6 +129,14 @@
     return String(d).slice(0, 10);
   }
 
+  function debounce(fn, wait) {
+    let t;
+    return function (...args) {
+      clearTimeout(t);
+      t = setTimeout(() => fn.apply(this, args), wait);
+    };
+  }
+
   function formatTime(d) {
     if (!d) return '';
     return String(d).replace('T', ' ').slice(0, 16);
@@ -263,49 +271,82 @@
   async function loadTasks() {
     try {
       const params = new URLSearchParams();
-      const unitVal = $('#filter-unit').value;
-      const statusVal = $('#filter-status').value;
       const kwVal = $('#filter-keyword').value.trim();
-      if (unitVal) params.set('unit', unitVal);
-      if (statusVal) params.set('status', statusVal);
       if (kwVal) params.set('keyword', kwVal);
 
       const data = await api('GET', '/api/tasks?' + params.toString());
       S.tasks = data.tasks || [];
 
-      // populate filter unit dropdown
-      populateFilterUnits();
       renderTaskTable();
     } catch (err) {
       toast(err.message, 'error');
     }
   }
 
-  function populateFilterUnits() {
-    const sel = $('#filter-unit');
-    const current = sel.value;
-    const units = [...new Set(S.tasks.map(t => t.responsible_unit).filter(Boolean))].sort();
-    sel.innerHTML = '<option value="">全部</option>' + units.map(u => `<option value="${esc(u)}">${esc(u)}</option>`).join('');
-    sel.value = current;
+  // ─── 列头筛选 / 排序 状态 ─────────────────────────────
+  // S.colFilters: { columnKey: Set<string> }, 仅显示这些值
+  // S.colSort:    { col: 'deadline', dir: 'asc'|'desc' } 当前排序
+  // S.dateRange:  { from: 'YYYY-MM-DD', to: 'YYYY-MM-DD' } 完成日期专用
+  if (!S.colFilters) S.colFilters = {};
+  if (!S.colSort) S.colSort = { col: '', dir: '' };
+  if (!S.dateRange) S.dateRange = { from: '', to: '' };
+
+  function getDisplayedTasks() {
+    let arr = S.tasks.slice();
+    // 列值筛选
+    Object.entries(S.colFilters).forEach(([col, set]) => {
+      if (!set || set.size === 0) return;
+      arr = arr.filter(t => {
+        const v = col === 'deadline' ? formatDate(t[col]) : (t[col] == null ? '' : String(t[col]));
+        return set.has(v);
+      });
+    });
+    // 完成日期区间
+    if (S.dateRange.from || S.dateRange.to) {
+      arr = arr.filter(t => {
+        const d = formatDate(t.deadline);
+        if (!d) return false;
+        if (S.dateRange.from && d < S.dateRange.from) return false;
+        if (S.dateRange.to && d > S.dateRange.to) return false;
+        return true;
+      });
+    }
+    // 排序
+    if (S.colSort.col) {
+      const { col, dir } = S.colSort;
+      const sign = dir === 'desc' ? -1 : 1;
+      arr.sort((a, b) => {
+        const va = a[col] == null ? '' : String(a[col]);
+        const vb = b[col] == null ? '' : String(b[col]);
+        if (col === 'deadline') return sign * (va.localeCompare(vb));
+        return sign * va.localeCompare(vb, 'zh');
+      });
+    }
+    return arr;
   }
 
   function renderTaskTable() {
     const isAdmin = S.user && S.user.role === 'admin';
     const tbody = $('#task-tbody');
-    const colCount = 11; // 10 data columns + 1 operations column
+    const colCount = 13; // 序号 + 11 数据列 + 操作
 
-    if (S.tasks.length === 0) {
+    const displayed = getDisplayedTasks();
+    S.displayedTasks = displayed;
+
+    if (displayed.length === 0) {
       tbody.innerHTML = `<tr><td colspan="${colCount}" class="empty-state"><p>暂无督办任务</p></td></tr>`;
       $('#task-count').textContent = '0';
+      updateColFilterButtons();
       return;
     }
 
-    tbody.innerHTML = S.tasks.map(t => {
+    tbody.innerHTML = displayed.map((t, idx) => {
       const attCount = (t.attachments || []).length;
-      // Admin: all fields are editable-cell; Normal user: top fields locked, bottom fields editable
       const lockCls = isAdmin ? 'editable-cell' : 'locked-cell';
       return `<tr data-task-id="${t.id}">
+        <td class="col-index text-center">${idx + 1}</td>
         <td class="${lockCls}" data-field="responsible_unit">${esc(t.responsible_unit)}</td>
+        <td class="${lockCls}" data-field="task_category">${esc(t.task_category || '')}</td>
         <td class="${lockCls}" data-field="task_content" style="text-align:left;white-space:pre-wrap;">${esc(t.task_content)}</td>
         <td class="${lockCls}" data-field="lead_leader">${esc(t.lead_leader)}</td>
         <td class="${lockCls}" data-field="responsible_person">${esc(t.responsible_person)}</td>
@@ -323,7 +364,7 @@
       </tr>`;
     }).join('');
 
-    // Bind inline editing: click on editable-cell to enter edit mode
+    // Bind inline editing
     $$('#task-tbody td.editable-cell').forEach(td => {
       td.addEventListener('click', function () {
         if (td.classList.contains('editing')) return;
@@ -331,12 +372,122 @@
       });
     });
 
-    $('#task-count').textContent = S.tasks.length;
+    $('#task-count').textContent = displayed.length;
+    updateColFilterButtons();
+  }
+
+  function updateColFilterButtons() {
+    $$('#task-table .col-filter-btn').forEach(btn => {
+      const col = btn.dataset.col;
+      const has = (S.colFilters[col] && S.colFilters[col].size > 0) ||
+                  (S.colSort.col === col) ||
+                  (col === 'deadline' && (S.dateRange.from || S.dateRange.to));
+      btn.classList.toggle('active', !!has);
+    });
+  }
+
+  // ─── 列头筛选弹层 ───────────────────────────────────
+  let cfpCurrentCol = '';
+  function bindColFilters() {
+    document.addEventListener('click', e => {
+      const btn = e.target.closest('.col-filter-btn');
+      if (btn) {
+        e.stopPropagation();
+        openColFilter(btn);
+        return;
+      }
+      const pop = $('#col-filter-popover');
+      if (pop && !pop.classList.contains('hidden') && !pop.contains(e.target)) {
+        pop.classList.add('hidden');
+      }
+    });
+
+    const pop = $('#col-filter-popover');
+    pop.addEventListener('click', e => e.stopPropagation());
+    pop.querySelectorAll('.cfp-sort button').forEach(b => {
+      b.addEventListener('click', () => {
+        const dir = b.dataset.sort;
+        S.colSort = dir ? { col: cfpCurrentCol, dir } : { col: '', dir: '' };
+        renderTaskTable();
+        // 高亮按钮状态
+        pop.querySelectorAll('.cfp-sort button').forEach(x => x.classList.toggle('active', x.dataset.sort === dir && dir !== ''));
+      });
+    });
+    $('#cfp-search').addEventListener('input', () => renderCfpValues($('#cfp-search').value));
+    $('#cfp-clear').addEventListener('click', () => {
+      delete S.colFilters[cfpCurrentCol];
+      if (cfpCurrentCol === 'deadline') S.dateRange = { from: '', to: '' };
+      pop.classList.add('hidden');
+      renderTaskTable();
+    });
+    $('#cfp-apply').addEventListener('click', () => {
+      const checked = [...pop.querySelectorAll('.cfp-values input[type=checkbox]:checked')].map(x => x.value);
+      if (checked.length === 0) {
+        delete S.colFilters[cfpCurrentCol];
+      } else {
+        S.colFilters[cfpCurrentCol] = new Set(checked);
+      }
+      if (cfpCurrentCol === 'deadline') {
+        S.dateRange = { from: $('#cfp-date-from').value, to: $('#cfp-date-to').value };
+      }
+      pop.classList.add('hidden');
+      renderTaskTable();
+    });
+  }
+
+  function openColFilter(btn) {
+    const col = btn.dataset.col;
+    cfpCurrentCol = col;
+    const pop = $('#col-filter-popover');
+    // 定位
+    const rect = btn.getBoundingClientRect();
+    pop.style.left = Math.max(8, Math.min(window.innerWidth - 280, rect.left + window.scrollX)) + 'px';
+    pop.style.top = (rect.bottom + window.scrollY + 4) + 'px';
+
+    // 排序按钮高亮
+    pop.querySelectorAll('.cfp-sort button').forEach(x => {
+      x.classList.toggle('active', S.colSort.col === col && S.colSort.dir === x.dataset.sort && x.dataset.sort !== '');
+    });
+
+    // 日期区间专属
+    const dateSec = pop.querySelector('.cfp-date');
+    if (col === 'deadline') {
+      dateSec.classList.remove('hidden');
+      $('#cfp-date-from').value = S.dateRange.from || '';
+      $('#cfp-date-to').value = S.dateRange.to || '';
+    } else {
+      dateSec.classList.add('hidden');
+    }
+
+    $('#cfp-search').value = '';
+    renderCfpValues('');
+    pop.classList.remove('hidden');
+  }
+
+  function renderCfpValues(filterText) {
+    const col = cfpCurrentCol;
+    const wrap = $('#cfp-values');
+    const seen = new Set();
+    (S.tasks || []).forEach(t => {
+      const v = col === 'deadline' ? formatDate(t[col]) : (t[col] == null ? '' : String(t[col]));
+      seen.add(v);
+    });
+    let values = [...seen].sort((a, b) => a.localeCompare(b, 'zh'));
+    if (filterText) {
+      const ft = filterText.toLowerCase();
+      values = values.filter(v => v.toLowerCase().includes(ft));
+    }
+    const active = S.colFilters[col] || new Set();
+    wrap.innerHTML = values.map(v => {
+      const checked = active.size === 0 ? false : active.has(v);
+      const display = v === '' ? '<em>(空)</em>' : esc(v);
+      return `<label><input type="checkbox" value="${esc(v)}" ${checked ? 'checked' : ''}>${display}</label>`;
+    }).join('') || '<p class="text-muted" style="padding:8px;">无可选值</p>';
   }
 
   // ─── Inline edit helpers ────────────────────────────
   // Fields that use the admin full-update API (PUT /api/tasks/:id)
-  const ADMIN_FIELDS = ['responsible_unit', 'task_content', 'lead_leader', 'responsible_person', 'deadline'];
+  const ADMIN_FIELDS = ['responsible_unit', 'task_category', 'task_content', 'lead_leader', 'responsible_person', 'deadline'];
   // Fields that use the progress API (PUT /api/tasks/:id/progress)
   const PROGRESS_FIELDS = ['progress', 'completion_status', 'blockers', 'coordination'];
 
@@ -364,7 +515,10 @@
       td.appendChild(sel);
       sel.focus();
 
+      let finishCalled = false;
       const finish = () => {
+        if (finishCalled) return;
+        finishCalled = true;
         const newVal = sel.value;
         if (newVal !== (task.completion_status || '推进中')) {
           saveInlineField(taskId, field, newVal, td);
@@ -372,8 +526,8 @@
           cancelInlineEdit(td, task);
         }
       };
-      sel.addEventListener('blur', finish);
       sel.addEventListener('change', finish);
+      sel.addEventListener('blur', finish);
     } else if (field === 'deadline') {
       // render a date input
       const inp = document.createElement('input');
@@ -419,11 +573,15 @@
         if (e.key === 'Escape') cancelInlineEdit(td, task);
       });
     } else {
-      // short text input (responsible_unit, lead_leader, responsible_person)
+      // short text input (responsible_unit, task_category, lead_leader, responsible_person)
       const inp = document.createElement('input');
       inp.type = 'text';
       inp.className = 'inline-input';
       inp.value = task[field] || '';
+      if (field === 'task_category') {
+        inp.setAttribute('list', 'task-category-options');
+        refreshCategoryDatalist();
+      }
       td.textContent = '';
       td.appendChild(inp);
       inp.focus();
@@ -462,28 +620,10 @@
       const task = S.tasks.find(x => x.id === taskId);
 
       if (ADMIN_FIELDS.includes(field)) {
-        // Use full task update API (admin only)
-        const body = {
-          task_no: task.task_no || '',
-          responsible_unit: field === 'responsible_unit' ? value : (task.responsible_unit || ''),
-          task_content: field === 'task_content' ? value : (task.task_content || ''),
-          lead_leader: field === 'lead_leader' ? value : (task.lead_leader || ''),
-          responsible_person: field === 'responsible_person' ? value : (task.responsible_person || ''),
-          deadline: field === 'deadline' ? value : (task.deadline ? formatDate(task.deadline) : null),
-          progress: task.progress || '',
-          completion_status: task.completion_status || '推进中',
-          blockers: task.blockers || '',
-          coordination: task.coordination || '',
-        };
+        const body = { [field]: value };
         await api('PUT', '/api/tasks/' + taskId, body);
       } else {
-        // Use progress update API (all users)
-        const body = {
-          progress: field === 'progress' ? value : (task.progress || ''),
-          completion_status: field === 'completion_status' ? value : (task.completion_status || '推进中'),
-          blockers: field === 'blockers' ? value : (task.blockers || ''),
-          coordination: field === 'coordination' ? value : (task.coordination || ''),
-        };
+        const body = { [field]: value };
         await api('PUT', '/api/tasks/' + taskId + '/progress', body);
       }
 
@@ -523,6 +663,8 @@
     $('#task-edit-id').value = isEdit ? task.id : '';
     $('#task-no').value = isEdit ? task.task_no || '' : '';
     $('#task-unit').value = isEdit ? task.responsible_unit || '' : '';
+    $('#task-category').value = isEdit ? task.task_category || '' : '';
+    refreshCategoryDatalist();
     $('#task-content').value = isEdit ? task.task_content || '' : '';
     $('#task-leader').value = isEdit ? task.lead_leader || '' : '';
     $('#task-person').value = isEdit ? task.responsible_person || '' : '';
@@ -539,6 +681,7 @@
     const body = {
       task_no: $('#task-no').value.trim(),
       responsible_unit: $('#task-unit').value.trim(),
+      task_category: $('#task-category').value.trim(),
       task_content: $('#task-content').value.trim(),
       lead_leader: $('#task-leader').value.trim(),
       responsible_person: $('#task-person').value.trim(),
@@ -579,6 +722,17 @@
   function editTask(id) {
     const t = S.tasks.find(x => x.id === id);
     if (t) openTaskModal(t);
+  }
+
+  async function refreshCategoryDatalist() {
+    try {
+      const data = await api('GET', '/api/task-categories');
+      const dl = $('#task-category-options');
+      if (!dl) return;
+      const fromTasks = [...new Set((S.tasks || []).map(t => t.task_category).filter(Boolean))];
+      const all = [...new Set([...(data.categories || []), ...fromTasks])].sort();
+      dl.innerHTML = all.map(c => `<option value="${esc(c)}"></option>`).join('');
+    } catch (e) { /* ignore */ }
   }
 
   // ─── Progress update ───────────────────────────────
@@ -738,172 +892,430 @@
   }
 
   // ─── Stats ──────────────────────────────────────────
-  let chartStatus, chartUnitStatus;
+  // 动态创建多个图表，统一管理，重渲染时全部销毁
+  let statsCharts = [];
+  function destroyStatsCharts() {
+    statsCharts.forEach(c => { try { c.destroy(); } catch (e) {} });
+    statsCharts = [];
+  }
 
-  async function loadStats() {
-    try {
-      // Fetch stats and all tasks in parallel
-      const [data, taskData] = await Promise.all([
-        api('GET', '/api/stats'),
-        api('GET', '/api/tasks')
-      ]);
-      const total = data.total || 0;
-      const rate = total > 0 ? ((data.completed / total) * 100).toFixed(1) : '0.0';
+  // 状态枚举颜色
+  const STATUS_COLORS = {
+    '已完成': '#22c55e', '推进中': '#3b82f6', '临期': '#f59e0b',
+    '超期': '#ef4444', '终止': '#9ca3af',
+  };
+  const STATUS_CHART_ORDER = ['已完成', '推进中', '终止', '临期', '超期'];
+  const STATUS_FOCUS_ORDER = ['终止', '临期', '超期'];
+  // 类别调色板
+  const CAT_PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#84cc16', '#14b8a6', '#f97316', '#6366f1', '#a855f7'];
 
-      $('#stats-overview').innerHTML = `
-        <div class="stat-card"><div class="stat-value">${total}</div><div class="stat-label">任务总数</div></div>
-        <div class="stat-card success"><div class="stat-value">${data.completed}</div><div class="stat-label">已完成</div></div>
-        <div class="stat-card warning"><div class="stat-value">${data.inProgress}</div><div class="stat-label">推进中</div></div>
-        <div class="stat-card danger"><div class="stat-value">${data.overdue}</div><div class="stat-label">超期</div></div>
-        <div class="stat-card info"><div class="stat-value">${rate}%</div><div class="stat-label">完成率</div></div>
-      `;
+  function normalizeStatusFront(s) {
+    const v = String(s || '').trim();
+    if (v === '已超期') return '超期';
+    if (v === '已终止') return '终止';
+    if (v === '预完成') return '已完成';
+    return v || '推进中';
+  }
 
-      // Status chart
-      const byStatus = data.byStatus || [];
-      const statusOrder = ['已完成', '推进中', '临期', '超期', '终止', '已超期', '已终止'];
-      const statusMap = new Map();
-      byStatus.forEach(r => {
-        const key = r.status === '预完成' ? '已完成' : r.status;
-        statusMap.set(key, (statusMap.get(key) || 0) + Number(r.cnt || 0));
-      });
-      const statusLabels = statusOrder.filter(status => statusMap.has(status));
-      const statusData = statusLabels.map(status => statusMap.get(status));
-      const statusColors = statusLabels.map(s => ({
-        '已完成': '#22c55e', '推进中': '#3b82f6', '临期': '#f59e0b',
-        '超期': '#ef4444', '终止': '#9ca3af',
-        '已超期': '#ef4444', '已终止': '#9ca3af'
-      }[s] || '#6b7280'));
+  // 给定一组任务，返回 [{status, count, color}]
+  function aggregateStatus(tasks) {
+    const order = ['已完成', '推进中', '临期', '超期', '终止'];
+    const map = new Map();
+    tasks.forEach(t => {
+      const s = normalizeStatusFront(t.completion_status);
+      map.set(s, (map.get(s) || 0) + 1);
+    });
+    return order.filter(s => map.has(s)).map(s => ({ status: s, count: map.get(s), color: STATUS_COLORS[s] || '#6b7280' }));
+  }
 
-      if (chartStatus) chartStatus.destroy();
-      chartStatus = new Chart($('#chart-status').getContext('2d'), {
-        type: 'doughnut',
-        data: { labels: statusLabels, datasets: [{ data: statusData, backgroundColor: statusColors, borderWidth: 2, borderColor: '#fff' }] },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
-      });
+  // 给定一组任务，返回每个任务类别下各状态数量
+  function aggregateCategory(tasks) {
+    const map = new Map();
+    tasks.forEach(t => {
+      const c = (t.task_category || '').trim() || '未分类';
+      if (!map.has(c)) map.set(c, { total: 0, completed: 0, statuses: {} });
+      const o = map.get(c);
+      o.total++;
+      const ns = normalizeStatusFront(t.completion_status);
+      o.statuses[ns] = (o.statuses[ns] || 0) + 1;
+      if (ns === '已完成') o.completed++;
+    });
+    return [...map.entries()]
+      .map(([cat, v]) => ({ cat, total: v.total, completed: v.completed, statuses: v.statuses }))
+      .filter(c => c.total > 0)
+      .sort((a, b) => (b.completed / b.total) - (a.completed / a.total));
+  }
 
-      // Unit completion rate chart - count all tasks per unit
-      const allTasks = taskData.tasks || [];
-      const today = new Date(); today.setHours(0,0,0,0);
+  function groupTasksByCategory(tasks) {
+    const map = new Map();
+    tasks.forEach(t => {
+      const cat = (t.task_category || '').trim() || '未分类';
+      if (!map.has(cat)) map.set(cat, []);
+      map.get(cat).push(t);
+    });
+    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0], 'zh'));
+  }
 
-      // Build per-unit stats: all tasks
-      const unitMap = {};
-      allTasks.forEach(t => {
-        const unit = t.responsible_unit;
-        if (!unit) return;
-        if (!unitMap[unit]) unitMap[unit] = { total: 0, completed: 0 };
-        unitMap[unit].total++;
-        if (t.completion_status === '已完成' || t.completion_status === '预完成') unitMap[unit].completed++;
-      });
-
-      const unitEntries = Object.entries(unitMap).filter(([, v]) => v.total > 0);
-      unitEntries.sort((a, b) => {
-        const rateA = a[1].total > 0 ? a[1].completed / a[1].total : 0;
-        const rateB = b[1].total > 0 ? b[1].completed / b[1].total : 0;
-        return rateB - rateA;
-      });
-
-      const unitLabels = unitEntries.map(([u]) => u);
-      const unitRates = unitEntries.map(([, v]) => v.total > 0 ? Math.round((v.completed / v.total) * 100) : 0);
-      const unitCompleted = unitEntries.map(([, v]) => v.completed);
-      const unitPending = unitEntries.map(([, v]) => v.total - v.completed);
-      const unitTotals = unitEntries.map(([, v]) => v.total);
-      const unitLabelWithRate = unitEntries.map(([u], idx) => `${u} (${unitRates[idx]}%)`);
-
-      if (chartUnitStatus) chartUnitStatus.destroy();
-      chartUnitStatus = new Chart($('#chart-unit-status').getContext('2d'), {
-        type: 'bar',
-        data: {
-          labels: unitLabelWithRate,
-          datasets: [{
-            label: '已完成',
-            data: unitCompleted,
-            backgroundColor: '#22c55e',
-            borderWidth: 0,
-            borderRadius: 4,
-          }, {
-            label: '未完成',
-            data: unitPending,
-            backgroundColor: '#3b82f6',
-            borderWidth: 0,
-            borderRadius: 4,
-          }]
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          scales: {
-            x: { stacked: true },
-            y: { beginAtZero: true, stacked: true }
-          },
-          plugins: {
-            legend: { display: true, position: 'bottom' },
-            tooltip: {
-              callbacks: {
-                label: function(ctx) {
-                  const idx = ctx.dataIndex;
-                  if (ctx.dataset.label === '已完成') {
-                    return `已完成: ${unitCompleted[idx]}，完成率: ${unitRates[idx]}%`;
-                  }
-                  return `未完成: ${unitPending[idx]}`;
-                }
+  function renderStatusDoughnut(canvas, tasks) {
+    const agg = aggregateStatus(tasks);
+    if (agg.length === 0) return null;
+    const ch = new Chart(canvas.getContext('2d'), {
+      type: 'doughnut',
+      data: {
+        labels: agg.map(a => a.status),
+        datasets: [{ data: agg.map(a => a.count), backgroundColor: agg.map(a => a.color), borderWidth: 2, borderColor: '#fff' }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        layout: { padding: { left: 115, right: 115, top: 34, bottom: 18 } },
+        cutout: '52%',
+        plugins: {
+          legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } },
+          tooltip: {
+            callbacks: {
+              label: ctx => {
+                const tot = agg.reduce((s, a) => s + a.count, 0);
+                return `${ctx.label}: ${ctx.parsed} (${Math.round(ctx.parsed / tot * 100)}%)`;
               }
             }
           }
         }
+      },
+      plugins: [doughnutLabelPlugin]
+    });
+    statsCharts.push(ch);
+    return ch;
+  }
+
+  function renderCategoryBar(canvas, tasks) {
+    const cats = aggregateCategory(tasks);
+    if (cats.length === 0) return null;
+    // 布局参数：同类别柱紧贴；类别之间固定空槽；两侧留对称边距槽位
+    const GAP_SLOTS = 3;            // 不同任务类别之间的空白槽位数量
+    const SIDE_PAD_SLOTS = 3;       // 整体两侧对称留白槽位数量
+    const barItems = [];
+    const groups = [];
+    for (let p = 0; p < SIDE_PAD_SLOTS; p++) barItems.push({ spacer: true });
+    cats.forEach((c, ci) => {
+      if (ci > 0) {
+        for (let g = 0; g < GAP_SLOTS; g++) barItems.push({ spacer: true });
+      }
+      const start = barItems.length;
+      STATUS_CHART_ORDER.forEach(status => {
+        const count = Number(c.statuses[status] || 0);
+        if (!count) return;
+        barItems.push({ cat: c.cat, status, count, completed: c.completed, total: c.total, rate: Math.round(c.completed / c.total * 100) });
+      });
+      if (barItems.length > start) groups.push({ cat: c.cat, start, end: barItems.length - 1, completed: c.completed, total: c.total, rate: Math.round(c.completed / c.total * 100) });
+    });
+    for (let p = 0; p < SIDE_PAD_SLOTS; p++) barItems.push({ spacer: true });
+    const ch = new Chart(canvas.getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels: barItems.map(item => item.spacer ? '' : item.status),
+        datasets: [{
+          label: '完成情况',
+          data: barItems.map(item => item.spacer ? null : item.count),
+          backgroundColor: barItems.map(item => item.spacer ? 'rgba(0,0,0,0)' : (STATUS_COLORS[item.status] || '#6b7280')),
+          borderRadius: 4,
+          borderSkipped: false,
+          categoryPercentage: 1.0,
+          barPercentage: 1.0,
+          maxBarThickness: 34,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        layout: { padding: { top: 24, bottom: 8 } },
+        scales: {
+          x: {
+            grid: { display: false },
+            ticks: {
+              autoSkip: false,
+              maxRotation: 0,
+              minRotation: 0,
+              font: { size: 11 },
+              callback: (value, index) => {
+                const g = groups.find(group => index >= group.start && index <= group.end);
+                if (!g) return '';
+                return index === Math.floor((g.start + g.end) / 2) ? g.cat : '';
+              }
+            }
+          },
+          y: {
+            beginAtZero: true,
+            grace: '20%',
+            ticks: { precision: 0 },
+            grid: { color: 'rgba(148, 163, 184, .18)' }
+          }
+        },
+        plugins: {
+          legend: {
+            display: true,
+            position: 'bottom',
+            labels: {
+              boxWidth: 12,
+              font: { size: 11 },
+              generateLabels: () => STATUS_CHART_ORDER.map((status, index) => ({
+                text: status,
+                fillStyle: STATUS_COLORS[status],
+                strokeStyle: STATUS_COLORS[status],
+                lineWidth: 0,
+                hidden: false,
+                datasetIndex: 0,
+                index,
+              }))
+            },
+            onClick: null
+          },
+          tooltip: {
+            filter: ctx => !!barItems[ctx.dataIndex] && !barItems[ctx.dataIndex].spacer,
+            callbacks: {
+              label: ctx => {
+                const item = barItems[ctx.dataIndex];
+                if (!item || item.spacer) return '';
+                return `${item.cat} - ${item.status}: ${item.count}，完成率${item.rate}%`;
+              }
+            }
+          }
+        }
+      },
+      plugins: [makeCategoryBarLabelPlugin(groups)]
+    });
+    statsCharts.push(ch);
+    return ch;
+  }
+
+  function renderUnitTaskDetails(tasks) {
+    const focusTasks = tasks.filter(t => STATUS_FOCUS_ORDER.includes(normalizeStatusFront(t.completion_status)));
+    if (!focusTasks.length) return '<div class="stats-unit-details empty">暂无终止、临期、超期任务</div>';
+    return `<div class="stats-unit-details">
+      ${groupTasksByCategory(focusTasks).map(([cat, catTasks]) => `
+        <div class="stats-category-group">
+          <div class="stats-category-title">${esc(cat)}（${catTasks.length}项）</div>
+          <div class="stats-task-table-wrap">
+            <table class="stats-mini-table">
+              <thead><tr>
+                <th style="min-width:80px;">完成情况</th>
+                <th style="min-width:180px;">工作任务</th>
+                <th style="min-width:70px;">牵头领导</th>
+                <th style="min-width:70px;">责任人</th>
+                <th style="min-width:90px;">完成日期</th>
+                <th style="min-width:160px;">进度情况</th>
+                <th style="min-width:140px;">遇到堵点</th>
+                <th style="min-width:140px;">需领导协调事项</th>
+              </tr></thead>
+              <tbody>${catTasks.map(t => `<tr>
+                <td>${statusBadge(normalizeStatusFront(t.completion_status))}</td>
+                <td style="white-space:pre-wrap;text-align:left;">${esc(t.task_content)}</td>
+                <td>${esc(t.lead_leader)}</td>
+                <td>${esc(t.responsible_person)}</td>
+                <td>${formatDate(t.deadline)}</td>
+                <td style="white-space:pre-wrap;text-align:left;">${esc(t.progress) || ''}</td>
+                <td style="white-space:pre-wrap;text-align:left;">${esc(t.blockers) || ''}</td>
+                <td style="white-space:pre-wrap;text-align:left;">${esc(t.coordination) || ''}</td>
+              </tr>`).join('')}</tbody>
+            </table>
+          </div>
+        </div>`).join('')}
+    </div>`;
+  }
+
+  // ─── Chart.js 常驻数字标签插件 ─────────────────────────
+  // 1) 饼图外侧标签 + 引导线：显示"名称 数量 (xx%)"
+  const doughnutLabelPlugin = {
+    id: 'doughnutLabel',
+    afterDatasetsDraw(chart) {
+      const { ctx, data, chartArea } = chart;
+      const ds = data.datasets[0];
+      if (!ds) return;
+      const meta = chart.getDatasetMeta(0);
+      const total = ds.data.reduce((a, b) => a + Number(b || 0), 0);
+      if (total === 0) return;
+
+      ctx.save();
+      ctx.font = 'bold 12px sans-serif';
+      ctx.textBaseline = 'middle';
+
+      // 收集左右两侧标签，按 y 排序后做防重叠调整
+      const items = [];
+      meta.data.forEach((arc, i) => {
+        const v = Number(ds.data[i] || 0);
+        if (!v) return;
+        const pct = Math.round(v / total * 100);
+        const props = arc.getProps(['x', 'y', 'startAngle', 'endAngle', 'outerRadius'], true);
+        const angle = (props.startAngle + props.endAngle) / 2;
+        const r = props.outerRadius;
+        const sx = props.x + Math.cos(angle) * r;
+        const sy = props.y + Math.sin(angle) * r;
+        const ex = props.x + Math.cos(angle) * (r + 16);
+        const ey = props.y + Math.sin(angle) * (r + 16);
+        const right = Math.cos(angle) >= 0;
+        const tx = right ? chartArea.right - 8 : chartArea.left + 8;
+        items.push({
+          i, sx, sy, ex, ey, tx, ty: ey, right,
+          color: ds.backgroundColor[i] || '#666',
+          text: `${data.labels[i]} ${v} (${pct}%)`,
+        });
       });
 
-      // Render tasks grouped by status - approaching, overdue and terminated
-      const groups = {
-        approaching: allTasks.filter(t => t.completion_status === '临期'),
-        overdue: allTasks.filter(t => t.completion_status === '超期' || t.completion_status === '已超期'),
-        terminated: allTasks.filter(t => t.completion_status === '终止' || t.completion_status === '已终止'),
-      };
-
-      Object.entries(groups).forEach(([key, tasks]) => {
-        $(`#stats-cnt-${key}`).textContent = tasks.length;
-        const list = $(`#stats-list-${key}`);
-        if (tasks.length === 0) {
-          list.innerHTML = '<p class="text-muted" style="padding:16px;text-align:center;">暂无任务</p>';
-        } else {
-          list.innerHTML = `<table class="stats-mini-table">
-            <thead><tr>
-              <th style="min-width:80px;">责任主体</th>
-              <th style="min-width:160px;">工作任务</th>
-              <th style="min-width:70px;">牵头领导</th>
-              <th style="min-width:70px;">责任人</th>
-              <th style="min-width:90px;">完成日期</th>
-              <th style="min-width:200px;">进度情况</th>
-              <th style="min-width:160px;">遇到堵点</th>
-              <th style="min-width:160px;">需领导协调事项</th>
-            </tr></thead>
-            <tbody>${tasks.map(t => `<tr>
-              <td>${esc(t.responsible_unit)}</td>
-              <td style="white-space:pre-wrap;text-align:left;">${esc(t.task_content)}</td>
-              <td>${esc(t.lead_leader)}</td>
-              <td>${esc(t.responsible_person)}</td>
-              <td>${formatDate(t.deadline)}</td>
-              <td style="white-space:pre-wrap;text-align:left;">${esc(t.progress) || ''}</td>
-              <td style="white-space:pre-wrap;text-align:left;">${esc(t.blockers) || ''}</td>
-              <td style="white-space:pre-wrap;text-align:left;">${esc(t.coordination) || ''}</td>
-            </tr>`).join('')}</tbody>
-          </table>`;
+      // 防重叠：左右各自按 y 排序，强制每行至少 16px
+      const minGap = 22;
+      ['left', 'right'].forEach(side => {
+        const list = items.filter(it => (side === 'right') === it.right).sort((a, b) => a.ty - b.ty);
+        for (let k = 1; k < list.length; k++) {
+          if (list[k].ty - list[k - 1].ty < minGap) {
+            list[k].ty = list[k - 1].ty + minGap;
+          }
+        }
+        const topLimit = chartArea.top + 20;
+        const bottomLimit = chartArea.bottom - 20;
+        if (list.length && list[list.length - 1].ty > bottomLimit) {
+          const shift = list[list.length - 1].ty - bottomLimit;
+          list.forEach(it => { it.ty -= shift; });
+        }
+        if (list.length && list[0].ty < topLimit) {
+          const shift = topLimit - list[0].ty;
+          list.forEach(it => { it.ty += shift; });
         }
       });
 
-      // Bind toggle collapse
-      $$('.stats-section-header').forEach(header => {
-        header.onclick = () => {
-          const listId = header.dataset.toggle;
-          const list = $('#' + listId);
-          const icon = header.querySelector('.toggle-icon');
-          if (list.classList.contains('collapsed')) {
-            list.classList.remove('collapsed');
-            icon.innerHTML = '&#9660;';
-          } else {
-            list.classList.add('collapsed');
-            icon.innerHTML = '&#9654;';
-          }
-        };
+      // 绘制引导线 + 标签
+      items.forEach(it => {
+        ctx.strokeStyle = it.color;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(it.sx, it.sy);
+        ctx.lineTo(it.ex, it.ey);
+        ctx.lineTo(it.tx, it.ty);
+        ctx.stroke();
+
+        ctx.fillStyle = '#374151';
+        ctx.textAlign = it.right ? 'left' : 'right';
+        ctx.fillText(it.text, it.tx + (it.right ? 2 : -2), it.ty);
       });
+      ctx.restore();
+    }
+  };
+
+  // 2) 任务类别紧凑柱：仅显示非零柱，分组顶部居中显示完成率
+  function makeCategoryBarLabelPlugin(groups) {
+    return {
+      id: 'categoryBarLabel',
+      afterDatasetsDraw(chart) {
+        const { ctx, chartArea } = chart;
+        const meta = chart.getDatasetMeta(0);
+        ctx.save();
+        ctx.font = '600 11px sans-serif';
+        ctx.textAlign = 'center';
+        // 每根柱顶显示数量
+        meta.data.forEach((bar, i) => {
+          const v = Number(chart.data.datasets[0].data[i] || 0);
+          if (!v) return;
+          const { x, y } = bar.getProps(['x', 'y'], true);
+          ctx.fillStyle = '#475569';
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(String(v), x, y - 6);
+        });
+
+        ctx.fillStyle = '#111827';
+        ctx.font = '700 12px sans-serif';
+        groups.forEach(group => {
+          const first = meta.data[group.start];
+          const last = meta.data[group.end];
+          if (!first || !last) return;
+          const firstProps = first.getProps(['x'], true);
+          const lastProps = last.getProps(['x'], true);
+          const topY = meta.data.slice(group.start, group.end + 1).reduce((min, bar) => {
+            const { y } = bar.getProps(['y'], true);
+            return Math.min(min, y);
+          }, chartArea.bottom);
+          const x = (firstProps.x + lastProps.x) / 2;
+          const y = Math.max(chartArea.top + 12, topY - 38);
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(`完成率${group.rate}%`, x, y);
+        });
+        ctx.restore();
+      }
+    };
+  }
+
+  async function loadStats() {
+    try {
+      destroyStatsCharts();
+      // Fetch tasks + units（按 sort_order 排序）
+      const [taskData, unitData] = await Promise.all([
+        api('GET', '/api/tasks'),
+        api('GET', '/api/units'),
+      ]);
+      const allTasks = taskData.tasks || [];
+      const allUnits = unitData.units || []; // 已按 sort_order, id 排序
+
+      // ─── 顶部 6 张数字卡片 ─────────────────────────
+      const total = allTasks.length;
+      const cntCompleted   = allTasks.filter(t => normalizeStatusFront(t.completion_status) === '已完成').length;
+      const cntInProgress  = allTasks.filter(t => normalizeStatusFront(t.completion_status) === '推进中').length;
+      const cntApproaching = allTasks.filter(t => normalizeStatusFront(t.completion_status) === '临期').length;
+      const cntOverdue     = allTasks.filter(t => normalizeStatusFront(t.completion_status) === '超期').length;
+      const rate = total > 0 ? ((cntCompleted / total) * 100).toFixed(1) : '0.0';
+
+      $('#stats-overview').innerHTML = `
+        <div class="stat-card"><div class="stat-value">${total}</div><div class="stat-label">任务总数</div></div>
+        <div class="stat-card success"><div class="stat-value">${cntCompleted}</div><div class="stat-label">已完成</div></div>
+        <div class="stat-card info"><div class="stat-value">${rate}%</div><div class="stat-label">完成率</div></div>
+        <div class="stat-card warning"><div class="stat-value">${cntInProgress}</div><div class="stat-label">推进中</div></div>
+        <div class="stat-card danger"><div class="stat-value">${cntOverdue}</div><div class="stat-label">超期</div></div>
+        <div class="stat-card" style="border-left-color:#f59e0b;"><div class="stat-value" style="color:#f59e0b;">${cntApproaching}</div><div class="stat-label">临期</div></div>
+      `;
+
+      // ─── 左侧：总览 + 各单位 ─────────────────────────
+      const left = $('#stats-charts');
+      // 取出"任务实际涉及到的单位"按 sort_order 排序；没在 units 表里的放最后（按名称）
+      const unitsWithTasks = (() => {
+        const presentNames = new Set(allTasks.map(t => t.responsible_unit).filter(Boolean));
+        const ordered = allUnits.filter(u => presentNames.has(u.name)).map(u => u.name);
+        const remaining = [...presentNames].filter(n => !ordered.includes(n)).sort((a, b) => a.localeCompare(b, 'zh'));
+        return [...ordered, ...remaining];
+      })();
+
+      let html = '';
+      // 总览块
+      html += `
+        <div class="stats-unit-block">
+          <div class="unit-title">总览</div>
+          <div class="chart-row">
+            <div class="chart-card"><h4>完成状态分布</h4><canvas id="ov-chart-status"></canvas></div>
+            <div class="chart-card"><h4>各任务类别完成情况</h4><canvas id="ov-chart-category"></canvas></div>
+          </div>
+        </div>`;
+      // 每个单位一块
+      unitsWithTasks.forEach((unit, idx) => {
+        html += `
+          <div class="stats-unit-block">
+            <div class="unit-title">${esc(unit)}</div>
+            <div class="chart-row">
+              <div class="chart-card"><h4>完成状态分布</h4><canvas id="u-chart-status-${idx}"></canvas></div>
+              <div class="chart-card"><h4>各任务类别完成情况</h4><canvas id="u-chart-category-${idx}"></canvas></div>
+            </div>
+            ${renderUnitTaskDetails(allTasks.filter(t => t.responsible_unit === unit))}
+          </div>`;
+      });
+      if (unitsWithTasks.length === 0) {
+        html += `<div class="stats-unit-block empty">暂无单位任务数据</div>`;
+      }
+      left.innerHTML = html;
+
+      // 渲染总览
+      renderStatusDoughnut($('#ov-chart-status'), allTasks);
+      renderCategoryBar($('#ov-chart-category'), allTasks);
+      // 渲染每单位
+      unitsWithTasks.forEach((unit, idx) => {
+        const unitTasks = allTasks.filter(t => t.responsible_unit === unit);
+        renderStatusDoughnut($('#u-chart-status-' + idx), unitTasks);
+        renderCategoryBar($('#u-chart-category-' + idx), unitTasks);
+      });
+
     } catch (err) {
       toast(err.message, 'error');
     }
@@ -1291,15 +1703,19 @@
     // Tasks
     $('#btn-add-task').addEventListener('click', () => openTaskModal(null));
     $('#btn-save-task').addEventListener('click', saveTask);
-    $('#btn-filter').addEventListener('click', loadTasks);
     $('#btn-filter-reset').addEventListener('click', () => {
-      $('#filter-unit').value = '';
-      $('#filter-status').value = '';
       $('#filter-keyword').value = '';
+      S.colFilters = {};
+      S.colSort = { col: '', dir: '' };
+      S.dateRange = { from: '', to: '' };
       loadTasks();
     });
-    // Allow enter key in keyword to trigger filter
+    // 关键词输入即时筛选
+    $('#filter-keyword').addEventListener('input', debounce(loadTasks, 300));
     $('#filter-keyword').addEventListener('keydown', e => { if (e.key === 'Enter') loadTasks(); });
+
+    // 列头筛选弹层
+    bindColFilters();
 
     // Progress
     $('#btn-save-progress').addEventListener('click', saveProgress);

@@ -13,7 +13,7 @@ const XLSX = require('xlsx');
 const docx = require('docx');
 
 // ─── 配置 ───────────────────────────────────────────
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 3002);
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 const BCRYPT_ROUNDS = 10;
 
@@ -150,6 +150,62 @@ function generateToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
+// 状态枚举（统一 6 种）
+const STATUS_LIST = ['推进中', '临期', '超期', '预完成', '已完成', '终止'];
+const STATUS_AUTO = new Set(['推进中', '临期', '超期']); // 自动逻辑可改写的范围
+const STATUS_LOCKED = new Set(['预完成', '已完成', '终止']); // 一旦进入这些状态，自动逻辑不再修改
+
+// 把旧别名归一到新枚举
+function normalizeStatus(s) {
+  const v = String(s || '').trim();
+  if (v === '已超期') return '超期';
+  if (v === '已终止') return '终止';
+  if (!v) return '推进中';
+  return v;
+}
+
+/**
+ * 根据 deadline 计算"自动状态"。规则：
+ *   - deadline < 今天 → 超期
+ *   - 今天 ≤ deadline ≤ 今天+15 → 临期
+ *   - 否则 → 推进中
+ * 仅适用于当前状态属于 STATUS_AUTO 集合的任务。
+ */
+function computeAutoStatus(deadline) {
+  if (!deadline) return '推进中';
+  let d;
+  if (deadline instanceof Date) {
+    d = new Date(deadline.getTime());
+  } else {
+    const ds = String(deadline).slice(0, 10);
+    d = new Date(ds + 'T00:00:00');
+  }
+  if (isNaN(d.getTime())) return '推进中';
+  d.setHours(0, 0, 0, 0);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diffDays = Math.floor((d.getTime() - today.getTime()) / 86400000);
+  if (diffDays < 0) return '超期';
+  if (diffDays <= 15) return '临期';
+  return '推进中';
+}
+
+async function applyAutoStatusRefresh(whereClause = '', params = []) {
+  const [rows] = await pool.execute(
+    `SELECT id, completion_status, status_manual_override, deadline FROM supervision_tasks${whereClause}`,
+    params
+  );
+  for (const t of rows) {
+    const current = normalizeStatus(t.completion_status);
+    const locked = t.status_manual_override == 1 || STATUS_LOCKED.has(current);
+    if (locked || !STATUS_AUTO.has(current)) continue;
+    const auto = computeAutoStatus(t.deadline);
+    if (auto !== current) {
+      await pool.execute('UPDATE supervision_tasks SET completion_status=?, updated_at=? WHERE id=?', [auto, now(), t.id]);
+    }
+  }
+}
+
 /**
  * 把 Excel 序列值 / 各种日期字符串 转换为 YYYY-MM-DD
  */
@@ -182,19 +238,25 @@ function parseExcelDate(value) {
 }
 
 // ─── 数据库初始化 ──────────────────────────────────────
+async function ensureColumn(table, column, ddl) {
+  try {
+    await pool.execute(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+    console.log(`已添加 ${table}.${column} 列`);
+  } catch (e) {
+    if (!e.message.includes('Duplicate column')) console.error(`ALTER TABLE ${table}.${column} 错误:`, e.message);
+  }
+}
+
 async function initDatabase() {
   pool = mysql.createPool(DB_CONFIG);
   const conn = await pool.getConnection();
   console.log('MySQL 连接成功');
   conn.release();
 
-  // 确保 force_password_change 列存在
-  try {
-    await pool.execute("ALTER TABLE users ADD COLUMN force_password_change TINYINT(1) DEFAULT 0");
-    console.log('已添加 force_password_change 列');
-  } catch (e) {
-    if (!e.message.includes('Duplicate column')) console.error('ALTER TABLE 错误:', e.message);
-  }
+  // 确保新增列存在（兼容旧库）
+  await ensureColumn('users', 'force_password_change', 'force_password_change TINYINT(1) DEFAULT 0');
+  await ensureColumn('supervision_tasks', 'task_category', "task_category VARCHAR(100) DEFAULT '' COMMENT '任务类别'");
+  await ensureColumn('supervision_tasks', 'status_manual_override', 'status_manual_override TINYINT(1) DEFAULT 0 COMMENT \'1=主管理员手动覆盖了状态，自动逻辑不再修改\'');
 
   const [admins] = await pool.execute('SELECT id FROM users WHERE username = ?', [DEFAULT_ADMIN.username]);
   if (admins.length === 0) {
@@ -598,10 +660,14 @@ app.get('/api/tasks', authenticate, async (req, res) => {
     if (deadline_from) { whereParts.push('deadline >= ?'); params.push(deadline_from); }
     if (deadline_to) { whereParts.push('deadline <= ?'); params.push(deadline_to); }
 
-    if (whereParts.length > 0) sql += ' WHERE ' + whereParts.join(' AND ');
-    sql += ' ORDER BY created_at DESC';
+    const refreshWhere = whereParts.length > 0 ? ' WHERE ' + whereParts.join(' AND ') : '';
+    await applyAutoStatusRefresh(refreshWhere, params);
+
+    if (whereParts.length > 0) sql += refreshWhere;
+    sql += ' ORDER BY deadline IS NULL, deadline ASC, id ASC';
 
     const [tasks] = await pool.execute(sql, params);
+    for (const t of tasks) t.completion_status = normalizeStatus(t.completion_status);
 
     if (tasks.length > 0) {
       const taskIds = tasks.map(t => t.id);
@@ -627,15 +693,18 @@ app.get('/api/tasks', authenticate, async (req, res) => {
 app.post('/api/tasks', authenticate, requireAdmin, async (req, res) => {
   try {
     const b = req.body;
+    const status = normalizeStatus(b.completion_status || '推进中');
+    const manualOverride = STATUS_LOCKED.has(status) ? 1 : 0;
     const [result] = await pool.execute(
       `INSERT INTO supervision_tasks
-        (task_no, responsible_unit, task_content, lead_leader, responsible_person, deadline, progress, completion_status, blockers, coordination, updated_by, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        (task_no, responsible_unit, task_category, task_content, lead_leader, responsible_person, deadline, progress, completion_status, status_manual_override, blockers, coordination, updated_by, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         String(b.task_no || '').trim(), String(b.responsible_unit || '').trim(),
+        String(b.task_category || '').trim(),
         String(b.task_content || '').trim(), String(b.lead_leader || '').trim(),
         String(b.responsible_person || '').trim(), parseExcelDate(b.deadline),
-        String(b.progress || '').trim(), String(b.completion_status || '推进中').trim(),
+        String(b.progress || '').trim(), status, manualOverride,
         String(b.blockers || '').trim(), String(b.coordination || '').trim(),
         req.user.name, now(), now()
       ]
@@ -653,17 +722,34 @@ app.post('/api/tasks', authenticate, requireAdmin, async (req, res) => {
 app.put('/api/tasks/:id', authenticate, requireAdmin, async (req, res) => {
   try {
     const b = req.body;
+    const [oldRows] = await pool.execute('SELECT * FROM supervision_tasks WHERE id=?', [req.params.id]);
+    if (oldRows.length === 0) return res.status(404).json({ message: '任务不存在。' });
+    const oldTask = oldRows[0];
+    const oldStatus = normalizeStatus(oldTask.completion_status);
+    const oldOverride = Number(oldTask.status_manual_override) || 0;
+    const hasStatus = Object.prototype.hasOwnProperty.call(b, 'completion_status');
+    const newStatus = hasStatus ? normalizeStatus(b.completion_status) : oldStatus;
+    // 主管理员手动改变状态 → 永久标记覆盖
+    let manualOverride = oldOverride;
+    if (newStatus !== oldStatus) {
+      // 与 progress 接口保持一致：任何显式状态变更都锁定，永不被自动逻辑覆盖
+      manualOverride = 1;
+    }
     await pool.execute(
       `UPDATE supervision_tasks SET
-        task_no=?, responsible_unit=?, task_content=?, lead_leader=?, responsible_person=?,
-        deadline=?, progress=?, completion_status=?, blockers=?, coordination=?, updated_by=?, updated_at=?
+        task_no=?, responsible_unit=?, task_category=?, task_content=?, lead_leader=?, responsible_person=?,
+        deadline=?, progress=?, completion_status=?, status_manual_override=?, blockers=?, coordination=?, updated_by=?, updated_at=?
        WHERE id=?`,
       [
-        String(b.task_no || '').trim(), String(b.responsible_unit || '').trim(),
-        String(b.task_content || '').trim(), String(b.lead_leader || '').trim(),
-        String(b.responsible_person || '').trim(), parseExcelDate(b.deadline),
-        String(b.progress || '').trim(), String(b.completion_status || '推进中').trim(),
-        String(b.blockers || '').trim(), String(b.coordination || '').trim(),
+        String(b.task_no ?? oldTask.task_no ?? '').trim(),
+        String(b.responsible_unit ?? oldTask.responsible_unit ?? '').trim(),
+        String(b.task_category ?? oldTask.task_category ?? '').trim(),
+        String(b.task_content ?? oldTask.task_content ?? '').trim(),
+        String(b.lead_leader ?? oldTask.lead_leader ?? '').trim(),
+        String(b.responsible_person ?? oldTask.responsible_person ?? '').trim(),
+        Object.prototype.hasOwnProperty.call(b, 'deadline') ? parseExcelDate(b.deadline) : oldTask.deadline,
+        String(b.progress ?? oldTask.progress ?? '').trim(), newStatus, manualOverride,
+        String(b.blockers ?? oldTask.blockers ?? '').trim(), String(b.coordination ?? oldTask.coordination ?? '').trim(),
         req.user.name, now(), req.params.id
       ]
     );
@@ -690,7 +776,15 @@ app.put('/api/tasks/:id/progress', authenticate, async (req, res) => {
 
     const fields = {};
     if (req.body.progress !== undefined) fields.progress = String(req.body.progress).trim();
-    if (req.body.completion_status !== undefined) fields.completion_status = String(req.body.completion_status).trim();
+    if (req.body.completion_status !== undefined) {
+      const ns = normalizeStatus(req.body.completion_status);
+      const oldNs = normalizeStatus(task.completion_status);
+      fields.completion_status = ns;
+      // 任何"显式"状态变更一律锁定，自动逻辑不再修改；只有从未被人工干预过的任务（override=0）由自动逻辑根据 deadline 推进。
+      if (ns !== oldNs) {
+        fields.status_manual_override = 1;
+      }
+    }
     if (req.body.blockers !== undefined) fields.blockers = String(req.body.blockers).trim();
     if (req.body.coordination !== undefined) fields.coordination = String(req.body.coordination).trim();
 
@@ -867,7 +961,7 @@ app.post('/api/tasks/import', authenticate, requireAdmin, upload.single('file'),
     const headers = allRows[headerRowIndex].map(c => String(c).trim());
     const colMap = {};
     const fieldMapping = {
-      '编号': 'task_no', '责任主体': 'responsible_unit', '工作任务': 'task_content',
+      '编号': 'task_no', '责任主体': 'responsible_unit', '任务类别': 'task_category', '工作任务': 'task_content',
       '牵头领导': 'lead_leader', '责任人': 'responsible_person', '要求完成日期': 'deadline'
     };
     for (let i = 0; i < headers.length; i++) {
@@ -890,6 +984,7 @@ app.post('/api/tasks/import', authenticate, requireAdmin, upload.single('file'),
         const getValue = (field) => colMap[field] !== undefined ? String(row[colMap[field]] || '').trim() : '';
         const taskNo = getValue('task_no');
         const responsibleUnit = getValue('responsible_unit');
+        const taskCategory = getValue('task_category') || '未分类';
         const taskContent = getValue('task_content');
         const leadLeader = getValue('lead_leader');
         const responsiblePerson = getValue('responsible_person');
@@ -906,9 +1001,9 @@ app.post('/api/tasks/import', authenticate, requireAdmin, upload.single('file'),
 
         await pool.execute(
           `INSERT INTO supervision_tasks
-            (task_no, responsible_unit, task_content, lead_leader, responsible_person, deadline, completion_status, updated_by, import_batch_id, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-          [taskNo, responsibleUnit, taskContent, leadLeader, responsiblePerson, deadline, '推进中', req.user.name, batchId, now(), now()]
+            (task_no, responsible_unit, task_category, task_content, lead_leader, responsible_person, deadline, completion_status, updated_by, import_batch_id, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [taskNo, responsibleUnit, taskCategory, taskContent, leadLeader, responsiblePerson, deadline, '推进中', req.user.name, batchId, now(), now()]
         );
         await pool.execute(
           'INSERT INTO import_rows (batch_id, `row_number`, status, raw_data) VALUES (?,?,?,?)',
@@ -950,7 +1045,7 @@ app.get('/api/tasks/export', authenticate, async (req, res) => {
     if (visibleUnits !== null) {
       if (visibleUnits.length === 0) {
         const wb = XLSX.utils.book_new();
-        const ws = XLSX.utils.aoa_to_sheet([['编号', '责任主体', '工作任务', '牵头领导', '责任人', '要求完成日期', '进度情况', '是否完成']]);
+        const ws = XLSX.utils.aoa_to_sheet([['编号', '责任主体', '任务类别', '工作任务', '牵头领导', '责任人', '要求完成日期', '进度情况', '完成情况', '遇到堵点', '需要领导协调解决的事项']]);
         XLSX.utils.book_append_sheet(wb, ws, '督办台账');
         const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -960,15 +1055,15 @@ app.get('/api/tasks/export', authenticate, async (req, res) => {
       sql += ` WHERE responsible_unit IN (${visibleUnits.map(() => '?').join(',')})`;
       params.push(...visibleUnits);
     }
-    sql += ' ORDER BY task_no, created_at';
+    sql += ' ORDER BY deadline IS NULL, deadline ASC, id ASC';
 
     const [tasks] = await pool.execute(sql, params);
 
-    const data = [['编号', '责任主体', '工作任务', '牵头领导', '责任人', '要求完成日期', '进度情况', '是否完成', '遇到堵点', '需要领导协调解决的事项']];
+    const data = [['编号', '责任主体', '任务类别', '工作任务', '牵头领导', '责任人', '要求完成日期', '进度情况', '完成情况', '遇到堵点', '需要领导协调解决的事项']];
     for (const t of tasks) {
       data.push([
-        t.task_no, t.responsible_unit, t.task_content, t.lead_leader, t.responsible_person,
-        t.deadline ? String(t.deadline).slice(0, 10) : '', t.progress || '', t.completion_status,
+        t.task_no, t.responsible_unit, t.task_category || '', t.task_content, t.lead_leader, t.responsible_person,
+        t.deadline ? String(t.deadline).slice(0, 10) : '', t.progress || '', normalizeStatus(t.completion_status),
         t.blockers || '', t.coordination || ''
       ]);
     }
@@ -976,7 +1071,7 @@ app.get('/api/tasks/export', authenticate, async (req, res) => {
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.aoa_to_sheet(data);
     ws['!cols'] = [
-      { wch: 8 }, { wch: 20 }, { wch: 50 }, { wch: 12 }, { wch: 12 },
+      { wch: 8 }, { wch: 20 }, { wch: 14 }, { wch: 50 }, { wch: 12 }, { wch: 12 },
       { wch: 14 }, { wch: 40 }, { wch: 10 }, { wch: 30 }, { wch: 30 }
     ];
     XLSX.utils.book_append_sheet(wb, ws, '督办台账');
@@ -1002,23 +1097,26 @@ app.get('/api/stats', authenticate, async (req, res) => {
 
     if (visibleUnits !== null) {
       if (visibleUnits.length === 0) {
-        return res.json({ total: 0, completed: 0, inProgress: 0, overdue: 0, byUnit: [], byStatus: [] });
+        return res.json({ total: 0, completed: 0, inProgress: 0, overdue: 0, byUnit: [], byStatus: [], byCategory: [] });
       }
       whereClause = ` WHERE responsible_unit IN (${visibleUnits.map(() => '?').join(',')})`;
       params.push(...visibleUnits);
     }
 
+    await applyAutoStatusRefresh(whereClause, params);
+
     const [totalRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}`, params);
-    const [completedRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} (completion_status = '已完成' OR completion_status = '预完成')`, params);
-    const [inProgressRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} completion_status = '推进中'`, params);
-    const [overdueRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} deadline < CURDATE() AND completion_status != '已完成' AND completion_status != '预完成'`, params);
+    const [completedRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} completion_status IN ('已完成','预完成')`, params);
+    const [inProgressRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} completion_status IN ('推进中','临期')`, params);
+    const [overdueRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} completion_status IN ('超期','已超期')`, params);
 
     const [byUnit] = await pool.execute(
       `SELECT responsible_unit as unit, COUNT(*) as total,
-        SUM(CASE WHEN completion_status='已完成' OR completion_status='预完成' THEN 1 ELSE 0 END) as completed,
-        SUM(CASE WHEN completion_status='已超期' THEN 1 ELSE 0 END) as overdue,
+        SUM(CASE WHEN completion_status IN ('已完成','预完成') THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN completion_status IN ('超期','已超期') THEN 1 ELSE 0 END) as overdue,
+        SUM(CASE WHEN completion_status='临期' THEN 1 ELSE 0 END) as nearing,
         SUM(CASE WHEN completion_status='推进中' THEN 1 ELSE 0 END) as \`inProgress\`,
-        SUM(CASE WHEN completion_status='已终止' THEN 1 ELSE 0 END) as \`terminated\`
+        SUM(CASE WHEN completion_status IN ('终止','已终止') THEN 1 ELSE 0 END) as \`terminated\`
        FROM supervision_tasks${whereClause} GROUP BY responsible_unit ORDER BY total DESC`,
       params
     );
@@ -1026,23 +1124,28 @@ app.get('/api/stats', authenticate, async (req, res) => {
     const [byStatus] = await pool.execute(
       `SELECT
          CASE
-           WHEN completion_status = '预完成' THEN '已完成'
+           WHEN completion_status='预完成' THEN '已完成'
+           WHEN completion_status='已超期' THEN '超期'
+           WHEN completion_status='已终止' THEN '终止'
            ELSE completion_status
          END as status,
          COUNT(*) as cnt
        FROM supervision_tasks${whereClause}
-       GROUP BY
-         CASE
-           WHEN completion_status = '预完成' THEN '已完成'
-           ELSE completion_status
-         END`,
+       GROUP BY status`,
+      params
+    );
+
+    const [byCategory] = await pool.execute(
+      `SELECT COALESCE(NULLIF(task_category,''), '未分类') as category, COUNT(*) as total,
+        SUM(CASE WHEN completion_status IN ('已完成','预完成') THEN 1 ELSE 0 END) as completed
+       FROM supervision_tasks${whereClause} GROUP BY category ORDER BY total DESC`,
       params
     );
 
     res.json({
       total: totalRows[0].cnt, completed: completedRows[0].cnt,
       inProgress: inProgressRows[0].cnt, overdue: overdueRows[0].cnt,
-      byUnit, byStatus
+      byUnit, byStatus, byCategory
     });
   } catch (err) {
     console.error('统计查询失败:', err);
@@ -1085,10 +1188,12 @@ app.get('/api/dashboard', authenticate, async (req, res) => {
       params.push(...visibleUnits);
     }
 
+    await applyAutoStatusRefresh(whereClause, params);
+
     const [totalRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}`, params);
-    const [completedRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} (completion_status = '已完成' OR completion_status = '预完成')`, params);
-    const [inProgressRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} completion_status = '推进中'`, params);
-    const [overdueRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} deadline < CURDATE() AND completion_status != '已完成' AND completion_status != '预完成'`, params);
+    const [completedRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} completion_status IN ('已完成','预完成')`, params);
+    const [inProgressRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} completion_status IN ('推进中','临期')`, params);
+    const [overdueRows] = await pool.execute(`SELECT COUNT(*) as cnt FROM supervision_tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} completion_status IN ('超期','已超期')`, params);
 
     let pendingUsers = 0;
     if (req.user.role === 'admin') {
@@ -1108,6 +1213,18 @@ app.get('/api/dashboard', authenticate, async (req, res) => {
     });
   } catch (err) {
     console.error('仪表盘查询失败:', err);
+    res.status(500).json({ message: '查询失败。' });
+  }
+});
+
+// ─── 任务类别（去重历史值，给前端 datalist 用） ───────
+app.get('/api/task-categories', authenticate, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      "SELECT DISTINCT task_category FROM supervision_tasks WHERE task_category IS NOT NULL AND task_category <> '' ORDER BY task_category"
+    );
+    res.json({ categories: rows.map(r => r.task_category) });
+  } catch (err) {
     res.status(500).json({ message: '查询失败。' });
   }
 });
@@ -1141,7 +1258,10 @@ app.get('/api/tasks/report', authenticate, async (req, res) => {
     sql += ' ORDER BY responsible_unit, created_at';
 
     const [allTasks] = await pool.execute(sql, params);
-    const tasks = allTasks.filter(t => ['临期', '超期', '已超期', '终止', '已终止'].includes(t.completion_status));
+    const tasks = allTasks.filter(t => {
+      const s = normalizeStatus(t.completion_status);
+      return s === '临期' || s === '超期' || s === '终止';
+    });
 
     if (tasks.length === 0) {
       return res.status(400).json({ message: '当前没有可生成报告的终止、临期或超期事项。' });
@@ -1182,7 +1302,7 @@ app.get('/api/tasks/report', authenticate, async (req, res) => {
           text: '督办事项情况通报',
           font: { name: '方正小标宋_GBK', eastAsia: '方正小标宋_GBK' },
           size: 44, // 二号 = 22pt = 44 half-points
-          bold: true,
+          bold: false,
         })
       ]
     }));
@@ -1196,7 +1316,7 @@ app.get('/api/tasks/report', authenticate, async (req, res) => {
             text: `${cnNumbers[unitIdx] || (unitIdx + 1)}、${unit}`,
             font: { name: '黑体', eastAsia: '黑体' },
             size: 32, // 三号 = 16pt = 32 half-points
-            bold: true,
+            bold: false,
           })
         ]
       }));
@@ -1204,7 +1324,7 @@ app.get('/api/tasks/report', authenticate, async (req, res) => {
       const unitTasks = unitGroups[unit];
       unitTasks.forEach((t, tIdx) => {
         // Task title: bold, with deadline and status - 仿宋GB2312 三号
-        const statusText = t.completion_status || '推进中';
+        const statusText = normalizeStatus(t.completion_status);
         const deadlineStr = t.deadline ? String(t.deadline).slice(0, 10).replace(/-/g, '').replace(/^(\d{4})(\d{2})(\d{2})$/, (_, y, m, d) => `${Number(m)}月${Number(d)}日`) : '';
         
         // Build task title text: "序号.任务内容（日期，状态）"
@@ -1222,7 +1342,7 @@ app.get('/api/tasks/report', authenticate, async (req, res) => {
               text: titleText,
               font: { name: '仿宋_GB2312', eastAsia: '仿宋_GB2312' },
               size: 32,
-              bold: true,
+              bold: false,
             })
           ]
         }));

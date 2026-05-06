@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>督办管理系统</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=20260501-11">
   <script src="/node_modules/chart.js/dist/chart.umd.js"></script>
 </head>
 <body>
@@ -142,29 +142,12 @@
             <!-- 筛选 -->
             <div class="filter-bar">
               <div class="filter-row">
-                <div class="filter-item">
-                  <label>责任主体</label>
-                  <select id="filter-unit" class="form-control"><option value="">全部</option></select>
-                </div>
-                <div class="filter-item">
-                  <label>完成状态</label>
-                  <select id="filter-status" class="form-control">
-                    <option value="">全部</option>
-                    <option value="推进中">推进中</option>
-                    <option value="临期">临期</option>
-                    <option value="超期">超期</option>
-                    <option value="终止">终止</option>
-                    <option value="预完成">预完成</option>
-                    <option value="已完成">已完成</option>
-                  </select>
-                </div>
-                <div class="filter-item">
+                <div class="filter-item filter-item-keyword">
                   <label>关键词</label>
                   <input type="text" id="filter-keyword" class="form-control" placeholder="搜索任务/编号/领导/责任人">
                 </div>
                 <div class="filter-actions">
-                  <button class="btn btn-primary btn-sm" id="btn-filter">筛选</button>
-                  <button class="btn btn-outline btn-sm" id="btn-filter-reset">重置</button>
+                  <button class="btn btn-outline btn-sm" id="btn-filter-reset">重置全部筛选</button>
                 </div>
               </div>
             </div>
@@ -174,16 +157,18 @@
               <table id="task-table">
                 <thead>
                   <tr>
-                    <th class="col-unit">责任主体</th>
-                    <th class="col-content">工作任务</th>
-                    <th class="col-leader">牵头领导</th>
-                    <th class="col-person">责任人</th>
-                    <th class="col-deadline">完成日期</th>
-                    <th class="col-progress">进度情况</th>
-                    <th class="col-status">是否完成</th>
+                    <th class="col-index">序号</th>
+                    <th class="col-unit" data-col="responsible_unit">责任主体<button class="col-filter-btn" data-col="responsible_unit" title="筛选/排序">▾</button></th>
+                    <th class="col-category" data-col="task_category">任务类别<button class="col-filter-btn" data-col="task_category" title="筛选/排序">▾</button></th>
+                    <th class="col-content" data-col="task_content">工作任务<button class="col-filter-btn" data-col="task_content" title="筛选/排序">▾</button></th>
+                    <th class="col-leader" data-col="lead_leader">牵头领导<button class="col-filter-btn" data-col="lead_leader" title="筛选/排序">▾</button></th>
+                    <th class="col-person" data-col="responsible_person">责任人<button class="col-filter-btn" data-col="responsible_person" title="筛选/排序">▾</button></th>
+                    <th class="col-deadline" data-col="deadline">完成日期<button class="col-filter-btn" data-col="deadline" title="筛选/排序">▾</button></th>
+                    <th class="col-progress" data-col="progress">进度情况<button class="col-filter-btn" data-col="progress" title="筛选/排序">▾</button></th>
+                    <th class="col-status" data-col="completion_status">完成情况<button class="col-filter-btn" data-col="completion_status" title="筛选/排序">▾</button></th>
                     <th class="col-attach">证明材料</th>
-                    <th class="col-blockers">遇到堵点</th>
-                    <th class="col-coord">需领导协调事项</th>
+                    <th class="col-blockers" data-col="blockers">遇到堵点<button class="col-filter-btn" data-col="blockers" title="筛选/排序">▾</button></th>
+                    <th class="col-coord" data-col="coordination">需领导协调事项<button class="col-filter-btn" data-col="coordination" title="筛选/排序">▾</button></th>
                     <th class="col-actions">操作</th>
                   </tr>
                 </thead>
@@ -201,34 +186,9 @@
               <div class="actions"><button class="btn btn-outline btn-sm" id="btn-refresh-stats">刷新</button></div>
             </div>
             <div class="stat-grid" id="stats-overview"></div>
-            <div class="chart-grid">
-              <div class="chart-card"><h4>完成状态分布</h4><canvas id="chart-status"></canvas></div>
-              <div class="chart-card"><h4>各单位完成情况</h4><canvas id="chart-unit-status"></canvas></div>
-            </div>
 
-            <!-- 按状态分类的任务列表（临期、超期和终止） -->
-            <div class="stats-task-lists">
-              <div class="stats-status-section" id="stats-section-approaching">
-                <div class="stats-section-header orange-header" data-toggle="stats-list-approaching">
-                  <h3>临期 (<span id="stats-cnt-approaching">0</span>)</h3>
-                  <span class="toggle-icon">&#9660;</span>
-                </div>
-                <div class="stats-task-list" id="stats-list-approaching"></div>
-              </div>
-              <div class="stats-status-section" id="stats-section-overdue">
-                <div class="stats-section-header danger-header" data-toggle="stats-list-overdue">
-                  <h3>超期 (<span id="stats-cnt-overdue">0</span>)</h3>
-                  <span class="toggle-icon">&#9660;</span>
-                </div>
-                <div class="stats-task-list" id="stats-list-overdue"></div>
-              </div>
-              <div class="stats-status-section" id="stats-section-terminated">
-                <div class="stats-section-header gray-header" data-toggle="stats-list-terminated">
-                  <h3>终止 (<span id="stats-cnt-terminated">0</span>)</h3>
-                  <span class="toggle-icon">&#9660;</span>
-                </div>
-                <div class="stats-task-list" id="stats-list-terminated"></div>
-              </div>
+            <div class="stats-layout">
+              <div class="stats-left" id="stats-charts"></div>
             </div>
           </div>
 
@@ -321,6 +281,10 @@
           <div class="form-row">
             <div class="form-group"><label>编号</label><input type="text" id="task-no" class="form-control" placeholder="如: 1"></div>
             <div class="form-group"><label>责任主体 <span class="required">*</span></label><input type="text" id="task-unit" class="form-control"></div>
+            <div class="form-group"><label>任务类别</label>
+              <input type="text" id="task-category" class="form-control" list="task-category-options" placeholder="如: 项目建设 / 政务服务 …">
+              <datalist id="task-category-options"></datalist>
+            </div>
           </div>
           <div class="form-group"><label>工作任务 <span class="required">*</span></label><textarea id="task-content" class="form-control" rows="3"></textarea></div>
           <div class="form-row">
@@ -535,6 +499,29 @@
   <!-- Toast 容器 -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="app.js"></script>
+  <!-- 列头筛选弹层 -->
+  <div id="col-filter-popover" class="col-filter-popover hidden">
+    <div class="cfp-section cfp-sort">
+      <button data-sort="asc">↑ 升序</button>
+      <button data-sort="desc">↓ 降序</button>
+      <button data-sort="">清除排序</button>
+    </div>
+    <div class="cfp-section cfp-date hidden">
+      <label>日期区间</label>
+      <input type="date" id="cfp-date-from" class="form-control">
+      <span>至</span>
+      <input type="date" id="cfp-date-to" class="form-control">
+    </div>
+    <div class="cfp-section">
+      <input type="text" id="cfp-search" class="form-control" placeholder="搜索值…">
+    </div>
+    <div class="cfp-section cfp-values" id="cfp-values"></div>
+    <div class="cfp-section cfp-footer">
+      <button class="btn btn-outline btn-sm" id="cfp-clear">清除筛选</button>
+      <button class="btn btn-primary btn-sm" id="cfp-apply">确定</button>
+    </div>
+  </div>
+
+  <script src="app.js?v=20260501-11"></script>
 </body>
 </html>

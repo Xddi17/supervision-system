@@ -733,6 +733,139 @@ tbody tr:hover { background-color: #e3f2fd; }
   .stats-unit-block .chart-row { grid-template-columns: 1fr; }
 }
 
+/* ─── 列隐藏 ─────────────────────────────────────────── */
+.col-hidden { display: none !important; }
+
+/* ─── 列设置弹窗里的勾选列表 ───────────────────────────── */
+.col-settings-list {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px 12px;
+}
+.col-settings-list label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius);
+  cursor: pointer;
+  background: #fff;
+  font-size: 13px;
+}
+.col-settings-list label:hover { background: var(--gray-50); }
+.col-settings-list input[type="checkbox"] { margin: 0; }
+
+/* ─── 工作台单位事项卡片 ───────────────────────────────── */
+.toggle-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--gray-700);
+  cursor: pointer;
+  user-select: none;
+}
+.toggle-inline input { margin: 0; }
+
+.unit-issue-group {
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius);
+  margin-bottom: 12px;
+  overflow: hidden;
+  background: #fff;
+}
+.unit-issue-group:last-child { margin-bottom: 0; }
+.unit-issue-group-header {
+  background: var(--gray-50);
+  border-bottom: 1px solid var(--gray-200);
+  padding: 8px 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--gray-700);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.unit-issue-group-header .count-tags {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--gray-500);
+}
+.unit-issue-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.unit-issue-table th,
+.unit-issue-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--gray-100);
+  text-align: left;
+  vertical-align: top;
+}
+.unit-issue-table th {
+  background: #fff;
+  color: var(--gray-600);
+  font-weight: 500;
+  font-size: 12px;
+  border-bottom: 1px solid var(--gray-200);
+}
+.unit-issue-table tr.notified { background: #f5f5f5; color: var(--gray-500); }
+/* 通用折叠类，覆盖所有有 .folded 的行（统计页 mini-table 也用同一规则） */
+tr.folded { display: none !important; }
+tr.notified { background: #f5f5f5; color: var(--gray-500); }
+.unit-issue-table td.actions { text-align: right; white-space: nowrap; }
+
+/* ─── 统计页 Tab ─────────────────────────────────────── */
+.tab-nav {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--gray-200);
+  margin-bottom: 16px;
+}
+.tab-btn {
+  background: transparent;
+  border: none;
+  padding: 10px 18px;
+  font-size: 14px;
+  color: var(--gray-600);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.tab-btn:hover { color: var(--primary); }
+.tab-btn.active {
+  color: var(--primary);
+  font-weight: 600;
+  border-bottom-color: var(--primary);
+}
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+.unit-button-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.unit-button-bar .unit-btn {
+  background: #fff;
+  border: 1px solid var(--gray-300);
+  color: var(--gray-700);
+  border-radius: 20px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.unit-button-bar .unit-btn:hover { border-color: var(--primary); color: var(--primary); }
+.unit-button-bar .unit-btn.active {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+
 /* ─── Recent tasks list ────────────────────────────── */
 .recent-list { list-style: none; }
 

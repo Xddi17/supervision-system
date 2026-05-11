@@ -13,7 +13,7 @@ const XLSX = require('xlsx');
 const docx = require('docx');
 
 // ─── 配置 ───────────────────────────────────────────
-const PORT = Number(process.env.PORT || 3002);
+const PORT = Number(process.env.PORT || 3100);
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 const BCRYPT_ROUNDS = 10;
 
@@ -21,7 +21,7 @@ const DB_CONFIG = {
   host: process.env.DB_HOST || '127.0.0.1',
   port: Number(process.env.DB_PORT || 3306),
   user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASS || '',
+  password: process.env.DB_PASS || 'Admin123!',
   database: process.env.DB_NAME || 'supervision_db',
   charset: 'utf8mb4',
   waitForConnections: true,
@@ -155,6 +155,20 @@ const STATUS_LIST = ['推进中', '临期', '超期', '预完成', '已完成', 
 const STATUS_AUTO = new Set(['推进中', '临期', '超期']); // 自动逻辑可改写的范围
 const STATUS_LOCKED = new Set(['预完成', '已完成', '终止']); // 一旦进入这些状态，自动逻辑不再修改
 
+// 把任意 Date / 字符串 deadline 安全格式化成 "x月x日"
+function fmtDeadlineCN(d) {
+  if (!d) return '';
+  let dt;
+  if (d instanceof Date) {
+    dt = d;
+  } else {
+    const s = String(d).slice(0, 10);
+    dt = new Date(s + 'T00:00:00');
+  }
+  if (isNaN(dt.getTime())) return '';
+  return `${dt.getMonth() + 1}月${dt.getDate()}日`;
+}
+
 // 把旧别名归一到新枚举
 function normalizeStatus(s) {
   const v = String(s || '').trim();
@@ -255,8 +269,18 @@ async function initDatabase() {
 
   // 确保新增列存在（兼容旧库）
   await ensureColumn('users', 'force_password_change', 'force_password_change TINYINT(1) DEFAULT 0');
+  await ensureColumn('users', 'preferences', "preferences TEXT DEFAULT NULL COMMENT '用户偏好 JSON: hiddenColumns / foldNotified 等'");
   await ensureColumn('supervision_tasks', 'task_category', "task_category VARCHAR(100) DEFAULT '' COMMENT '任务类别'");
   await ensureColumn('supervision_tasks', 'status_manual_override', 'status_manual_override TINYINT(1) DEFAULT 0 COMMENT \'1=主管理员手动覆盖了状态，自动逻辑不再修改\'');
+
+  // 已通报表（按账号区分）
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS user_notified_tasks (
+      user_id INT NOT NULL,
+      task_id INT NOT NULL,
+      notified_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, task_id)
+    ) ENGINE=InnoDB`);
 
   const [admins] = await pool.execute('SELECT id FROM users WHERE username = ?', [DEFAULT_ADMIN.username]);
   if (admins.length === 0) {
@@ -325,12 +349,27 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+function parsePrefs(raw) {
+  if (!raw) return { hiddenColumns: [], foldNotified: true, showCompleted: false };
+  try {
+    const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return {
+      hiddenColumns: Array.isArray(p.hiddenColumns) ? p.hiddenColumns : [],
+      foldNotified: p.foldNotified !== false, // 默认 true
+      showCompleted: p.showCompleted === true, // 默认 false（隐藏已完成）
+    };
+  } catch {
+    return { hiddenColumns: [], foldNotified: true, showCompleted: false };
+  }
+}
+
 function safeUser(u) {
   return {
     id: u.id, username: u.username, name: u.name, phone: u.phone || '',
     unit: u.unit || '', role: u.role, status: u.status,
     created_at: u.created_at, approved_at: u.approved_at,
     unitPermissions: u.unitPermissions || [],
+    preferences: parsePrefs(u.preferences),
     forcePasswordChange: u.force_password_change === 1 || u.force_password_change === true
   };
 }
@@ -463,6 +502,176 @@ app.post('/api/auth/change-password', authenticate, async (req, res) => {
     res.json({ ok: true, message: '密码修改成功。' });
   } catch (err) {
     res.status(500).json({ message: '操作失败。' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════
+//  个人偏好（列隐藏 / 折叠已通报）+ 已通报标记
+// ═══════════════════════════════════════════════════════
+
+// 更新（合并）当前用户偏好
+app.put('/api/me/preferences', authenticate, async (req, res) => {
+  try {
+    const current = parsePrefs(req.user.preferences);
+    const body = req.body || {};
+    if (Array.isArray(body.hiddenColumns)) {
+      current.hiddenColumns = body.hiddenColumns.map(String);
+    }
+    if (typeof body.foldNotified === 'boolean') {
+      current.foldNotified = body.foldNotified;
+    }
+    if (typeof body.showCompleted === 'boolean') {
+      current.showCompleted = body.showCompleted;
+    }
+    await pool.execute('UPDATE users SET preferences=? WHERE id=?', [JSON.stringify(current), req.user.id]);
+    res.json({ preferences: current });
+  } catch (err) {
+    res.status(500).json({ message: '保存偏好失败。' });
+  }
+});
+
+// 标记任务"已通报"
+app.post('/api/me/notified/:taskId', authenticate, async (req, res) => {
+  try {
+    const taskId = Number(req.params.taskId);
+    if (!taskId) return res.status(400).json({ message: '参数错误。' });
+    await pool.execute(
+      'INSERT IGNORE INTO user_notified_tasks (user_id, task_id, notified_at) VALUES (?, ?, ?)',
+      [req.user.id, taskId, now()]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ message: '操作失败。' });
+  }
+});
+
+// 当前用户已通报的任务 ID 列表
+app.get('/api/me/notified-ids', authenticate, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT task_id FROM user_notified_tasks WHERE user_id=?', [req.user.id]);
+    res.json({ ids: rows.map(r => r.task_id) });
+  } catch (err) {
+    res.status(500).json({ message: '查询失败。' });
+  }
+});
+
+// 取消"已通报"
+app.delete('/api/me/notified/:taskId', authenticate, async (req, res) => {
+  try {
+    const taskId = Number(req.params.taskId);
+    if (!taskId) return res.status(400).json({ message: '参数错误。' });
+    await pool.execute(
+      'DELETE FROM user_notified_tasks WHERE user_id=? AND task_id=?',
+      [req.user.id, taskId]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ message: '操作失败。' });
+  }
+});
+
+// 工作台主信息流（根据角色返回不同视图数据）
+// 主管理员：近 15 天各单位更新条数
+// 普通用户：近 1 个月内下发（创建）的事项
+app.get('/api/dashboard/feed', authenticate, async (req, res) => {
+  try {
+    const isAdmin = req.user.role === 'admin';
+    if (isAdmin) {
+      // 近 15 天，每个单位 updated_at 落在窗口内的"任务更新数"
+      const [rows] = await pool.execute(
+        `SELECT responsible_unit AS unit, COUNT(*) AS cnt
+         FROM supervision_tasks
+         WHERE updated_at >= (NOW() - INTERVAL 15 DAY)
+         GROUP BY responsible_unit
+         ORDER BY cnt DESC, responsible_unit`);
+      res.json({ kind: 'admin', items: rows });
+    } else {
+      const visibleUnits = await getVisibleUnits(req.user);
+      let where = ' WHERE created_at >= (NOW() - INTERVAL 1 MONTH)';
+      const params = [];
+      if (visibleUnits !== null) {
+        if (visibleUnits.length === 0) return res.json({ kind: 'user', items: [] });
+        where += ` AND responsible_unit IN (${visibleUnits.map(() => '?').join(',')})`;
+        params.push(...visibleUnits);
+      }
+      const [rows] = await pool.execute(
+        `SELECT id, task_no, responsible_unit, task_category, task_content,
+                lead_leader, responsible_person, deadline, completion_status, created_at
+         FROM supervision_tasks${where}
+         ORDER BY created_at DESC`, params);
+      res.json({ kind: 'user', items: rows });
+    }
+  } catch (err) {
+    console.error('dashboard feed:', err);
+    res.status(500).json({ message: '查询失败。' });
+  }
+});
+
+// 工作台：各单位的 临期 / 超期 / 终止 事项 + 当前用户的已通报状态
+app.get('/api/dashboard/unit-issues', authenticate, async (req, res) => {
+  try {
+    const visibleUnits = await getVisibleUnits(req.user);
+    let whereClause = '';
+    const params = [];
+    if (visibleUnits !== null) {
+      if (visibleUnits.length === 0) return res.json({ units: [] });
+      whereClause = ` WHERE responsible_unit IN (${visibleUnits.map(() => '?').join(',')})`;
+      params.push(...visibleUnits);
+    }
+    await applyAutoStatusRefresh(whereClause, params);
+
+    const [tasks] = await pool.execute(
+      `SELECT id, task_no, responsible_unit, task_category, task_content, lead_leader,
+              responsible_person, deadline, progress, completion_status, blockers, coordination
+       FROM supervision_tasks${whereClause}
+       ORDER BY responsible_unit, deadline`,
+      params
+    );
+
+    // 仅保留 临期/超期/终止
+    const FOCUS = new Set(['临期', '超期', '终止']);
+    const filtered = tasks.filter(t => FOCUS.has(normalizeStatus(t.completion_status)));
+
+    // 取出当前用户已通报集合
+    const [notifiedRows] = await pool.execute(
+      'SELECT task_id FROM user_notified_tasks WHERE user_id=?', [req.user.id]);
+    const notifiedSet = new Set(notifiedRows.map(r => r.task_id));
+
+    // 按 units 排序
+    const [unitRows] = await pool.execute('SELECT name, sort_order FROM units ORDER BY sort_order, id');
+    const order = {};
+    unitRows.forEach((u, i) => { order[u.name] = u.sort_order != null ? u.sort_order : i; });
+
+    const grouped = {};
+    for (const t of filtered) {
+      const u = t.responsible_unit || '未分配';
+      if (!grouped[u]) grouped[u] = [];
+      grouped[u].push({
+        id: t.id,
+        task_no: t.task_no,
+        task_category: t.task_category || '',
+        task_content: t.task_content || '',
+        lead_leader: t.lead_leader || '',
+        responsible_person: t.responsible_person || '',
+        deadline: t.deadline,
+        progress: t.progress || '',
+        completion_status: normalizeStatus(t.completion_status),
+        blockers: t.blockers || '',
+        coordination: t.coordination || '',
+        notified: notifiedSet.has(t.id),
+      });
+    }
+    const units = Object.keys(grouped).sort((a, b) => {
+      const oa = order[a] != null ? order[a] : 9999;
+      const ob = order[b] != null ? order[b] : 9999;
+      return oa - ob;
+    }).map(name => ({ name, tasks: grouped[name] }));
+
+    res.json({ units });
+  } catch (err) {
+    console.error('unit-issues:', err);
+    res.status(500).json({ message: '查询失败。' });
   }
 });
 
@@ -999,15 +1208,34 @@ app.post('/api/tasks/import', authenticate, requireAdmin, upload.single('file'),
           continue;
         }
 
-        await pool.execute(
-          `INSERT INTO supervision_tasks
-            (task_no, responsible_unit, task_category, task_content, lead_leader, responsible_person, deadline, completion_status, updated_by, import_batch_id, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [taskNo, responsibleUnit, taskCategory, taskContent, leadLeader, responsiblePerson, deadline, '推进中', req.user.name, batchId, now(), now()]
+        // 工作任务相同则覆盖：先按 task_content（去前后空格）匹配，找到就 UPDATE，否则 INSERT
+        const [existing] = await pool.execute(
+          'SELECT id FROM supervision_tasks WHERE TRIM(task_content) = ? LIMIT 1',
+          [taskContent]
         );
+        let action;
+        if (existing.length > 0) {
+          await pool.execute(
+            `UPDATE supervision_tasks SET
+              task_no=?, responsible_unit=?, task_category=?, lead_leader=?,
+              responsible_person=?, deadline=?, updated_by=?, import_batch_id=?, updated_at=?
+             WHERE id=?`,
+            [taskNo, responsibleUnit, taskCategory, leadLeader, responsiblePerson, deadline,
+             req.user.name, batchId, now(), existing[0].id]
+          );
+          action = 'overwrite';
+        } else {
+          await pool.execute(
+            `INSERT INTO supervision_tasks
+              (task_no, responsible_unit, task_category, task_content, lead_leader, responsible_person, deadline, completion_status, updated_by, import_batch_id, created_at, updated_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+            [taskNo, responsibleUnit, taskCategory, taskContent, leadLeader, responsiblePerson, deadline, '推进中', req.user.name, batchId, now(), now()]
+          );
+          action = 'insert';
+        }
         await pool.execute(
-          'INSERT INTO import_rows (batch_id, `row_number`, status, raw_data) VALUES (?,?,?,?)',
-          [batchId, headerRowIndex + 2 + i, 'success', JSON.stringify(row)]
+          'INSERT INTO import_rows (batch_id, `row_number`, status, error_msg, raw_data) VALUES (?,?,?,?,?)',
+          [batchId, headerRowIndex + 2 + i, 'success', action === 'overwrite' ? '覆盖已有任务' : '', JSON.stringify(row)]
         );
         successCount++;
       } catch (rowErr) {
@@ -1325,8 +1553,8 @@ app.get('/api/tasks/report', authenticate, async (req, res) => {
       unitTasks.forEach((t, tIdx) => {
         // Task title: bold, with deadline and status - 仿宋GB2312 三号
         const statusText = normalizeStatus(t.completion_status);
-        const deadlineStr = t.deadline ? String(t.deadline).slice(0, 10).replace(/-/g, '').replace(/^(\d{4})(\d{2})(\d{2})$/, (_, y, m, d) => `${Number(m)}月${Number(d)}日`) : '';
-        
+        const deadlineStr = fmtDeadlineCN(t.deadline);
+
         // Build task title text: "序号.任务内容（日期，状态）"
         let titleText = `${tIdx + 1}.${t.task_content || ''}`;
         const metaParts = [];
@@ -1347,19 +1575,23 @@ app.get('/api/tasks/report', authenticate, async (req, res) => {
           ]
         }));
 
-        // Progress content: 仿宋GB2312 三号, normal weight
-        if (t.progress) {
+        // 进度情况 + 遇到堵点 + 需领导协调事项，合并到同一段（每行一个标签前缀）
+        const bodyLines = [];
+        if (t.progress && String(t.progress).trim()) bodyLines.push(`进度情况：${String(t.progress).trim()}`);
+        if (t.blockers && String(t.blockers).trim()) bodyLines.push(`遇到堵点：${String(t.blockers).trim()}`);
+        if (t.coordination && String(t.coordination).trim()) bodyLines.push(`需领导协调事项：${String(t.coordination).trim()}`);
+        bodyLines.forEach(line => {
           children.push(new docx.Paragraph({
             indent: { firstLine: 640 },
             children: [
               new docx.TextRun({
-                text: t.progress,
+                text: line,
                 font: { name: '仿宋_GB2312', eastAsia: '仿宋_GB2312' },
                 size: 32,
               })
             ]
           }));
-        }
+        });
       });
     });
 

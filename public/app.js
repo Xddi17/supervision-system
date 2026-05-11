@@ -168,6 +168,13 @@
       else el.classList.add('hidden');
     });
 
+    // 同步偏好（折叠开关）
+    if (S.user && S.user.preferences) {
+      const t = $('#toggle-fold-notified');
+      if (t) t.checked = S.user.preferences.foldNotified !== false;
+      applyHiddenColumnsFromPrefs();
+    }
+
     navigateTo('dashboard');
   }
 
@@ -239,6 +246,7 @@
 
   // ─── Dashboard ──────────────────────────────────────
   async function loadDashboard() {
+    loadDashboardFeed();
     try {
       const data = await api('GET', '/api/dashboard');
       const grid = $('#dash-stats');
@@ -249,19 +257,7 @@
         <div class="stat-card danger"><div class="stat-value">${data.taskOverdue}</div><div class="stat-label">已超期</div></div>
         ${S.user.role === 'admin' ? `<div class="stat-card info"><div class="stat-value">${data.pendingUsers}</div><div class="stat-label">待审核用户</div></div>` : ''}
       `;
-      const list = $('#dash-recent');
-      if (!data.recentTasks || data.recentTasks.length === 0) {
-        list.innerHTML = '<li class="empty-state"><p>暂无任务数据</p></li>';
-      } else {
-        list.innerHTML = data.recentTasks.map(t => `
-          <li>
-            <div class="task-info">
-              <div class="task-title">${esc(t.task_no ? '[' + t.task_no + '] ' : '')}${esc(t.task_content)}</div>
-              <div class="task-meta">${esc(t.responsible_unit)} | ${formatTime(t.updated_at)}</div>
-            </div>
-            ${statusBadge(t.completion_status)}
-          </li>`).join('');
-      }
+      // "最近更新的任务" 板块已下线，不再渲染
     } catch (err) {
       toast(err.message, 'error');
     }
@@ -293,6 +289,10 @@
 
   function getDisplayedTasks() {
     let arr = S.tasks.slice();
+    // 默认隐藏「已完成」（除非用户在列设置里勾了"显示已完成"）
+    if (!getShowCompleted()) {
+      arr = arr.filter(t => normalizeStatusFront(t.completion_status) !== '已完成');
+    }
     // 列值筛选
     Object.entries(S.colFilters).forEach(([col, set]) => {
       if (!set || set.size === 0) return;
@@ -353,7 +353,7 @@
         <td class="${lockCls}" data-field="deadline">${formatDate(t.deadline)}</td>
         <td class="editable-cell" data-field="progress" style="white-space:pre-wrap;">${esc(t.progress) || ''}</td>
         <td class="editable-cell text-center" data-field="completion_status">${statusBadge(t.completion_status)}</td>
-        <td class="text-center">
+        <td class="text-center" data-field="attach">
           <button class="btn btn-sm btn-outline" onclick="APP.openAttach(${t.id})">${attCount > 0 ? attCount + ' 个文件' : '上传'}</button>
         </td>
         <td class="editable-cell" data-field="blockers" style="white-space:pre-wrap;">${esc(t.blockers) || ''}</td>
@@ -374,6 +374,7 @@
 
     $('#task-count').textContent = displayed.length;
     updateColFilterButtons();
+    applyHiddenColumnsFromPrefs();
   }
 
   function updateColFilterButtons() {
@@ -1087,7 +1088,11 @@
     return ch;
   }
 
-  function renderUnitTaskDetails(tasks) {
+  function renderUnitTaskDetails(tasks, opts) {
+    opts = opts || {};
+    const withNotify = !!opts.withNotify; // 是否在末列追加"已通报"按钮
+    const notifiedSet = opts.notifiedSet || new Set();
+    const fold = !!opts.fold;
     const focusTasks = tasks.filter(t => STATUS_FOCUS_ORDER.includes(normalizeStatusFront(t.completion_status)));
     if (!focusTasks.length) return '<div class="stats-unit-details empty">暂无终止、临期、超期任务</div>';
     return `<div class="stats-unit-details">
@@ -1105,17 +1110,30 @@
                 <th style="min-width:160px;">进度情况</th>
                 <th style="min-width:140px;">遇到堵点</th>
                 <th style="min-width:140px;">需领导协调事项</th>
+                ${withNotify ? '<th style="min-width:96px;">操作</th>' : ''}
               </tr></thead>
-              <tbody>${catTasks.map(t => `<tr>
-                <td>${statusBadge(normalizeStatusFront(t.completion_status))}</td>
-                <td style="white-space:pre-wrap;text-align:left;">${esc(t.task_content)}</td>
-                <td>${esc(t.lead_leader)}</td>
-                <td>${esc(t.responsible_person)}</td>
-                <td>${formatDate(t.deadline)}</td>
-                <td style="white-space:pre-wrap;text-align:left;">${esc(t.progress) || ''}</td>
-                <td style="white-space:pre-wrap;text-align:left;">${esc(t.blockers) || ''}</td>
-                <td style="white-space:pre-wrap;text-align:left;">${esc(t.coordination) || ''}</td>
-              </tr>`).join('')}</tbody>
+              <tbody>${catTasks.map(t => {
+                const isNotified = notifiedSet.has(t.id);
+                const trCls = withNotify ? ((isNotified ? 'notified' : '') + (isNotified && fold ? ' folded' : '')) : '';
+                const notifyTd = withNotify
+                  ? `<td class="actions" style="text-align:right;white-space:nowrap;">${
+                      isNotified
+                        ? `<button class="btn btn-sm btn-outline" onclick="APP.unnotifyTask(${t.id})">取消通报</button>`
+                        : `<button class="btn btn-sm btn-primary" onclick="APP.notifyTask(${t.id})">已通报</button>`
+                    }</td>`
+                  : '';
+                return `<tr data-task-id="${t.id}" class="${trCls}">
+                  <td>${statusBadge(normalizeStatusFront(t.completion_status))}</td>
+                  <td style="white-space:pre-wrap;text-align:left;">${esc(t.task_content)}</td>
+                  <td>${esc(t.lead_leader)}</td>
+                  <td>${esc(t.responsible_person)}</td>
+                  <td>${formatDate(t.deadline)}</td>
+                  <td style="white-space:pre-wrap;text-align:left;">${esc(t.progress) || ''}</td>
+                  <td style="white-space:pre-wrap;text-align:left;">${esc(t.blockers) || ''}</td>
+                  <td style="white-space:pre-wrap;text-align:left;">${esc(t.coordination) || ''}</td>
+                  ${notifyTd}
+                </tr>`;
+              }).join('')}</tbody>
             </table>
           </div>
         </div>`).join('')}
@@ -1244,13 +1262,15 @@
   async function loadStats() {
     try {
       destroyStatsCharts();
-      // Fetch tasks + units（按 sort_order 排序）
-      const [taskData, unitData] = await Promise.all([
+      // Fetch tasks + units + 当前用户已通报集合
+      const [taskData, unitData, notifData] = await Promise.all([
         api('GET', '/api/tasks'),
         api('GET', '/api/units'),
+        api('GET', '/api/me/notified-ids').catch(() => ({ ids: [] })),
       ]);
       const allTasks = taskData.tasks || [];
       const allUnits = unitData.units || []; // 已按 sort_order, id 排序
+      S.notifiedIds = new Set(notifData.ids || []);
 
       // ─── 顶部 6 张数字卡片 ─────────────────────────
       const total = allTasks.length;
@@ -1269,8 +1289,6 @@
         <div class="stat-card" style="border-left-color:#f59e0b;"><div class="stat-value" style="color:#f59e0b;">${cntApproaching}</div><div class="stat-label">临期</div></div>
       `;
 
-      // ─── 左侧：总览 + 各单位 ─────────────────────────
-      const left = $('#stats-charts');
       // 取出"任务实际涉及到的单位"按 sort_order 排序；没在 units 表里的放最后（按名称）
       const unitsWithTasks = (() => {
         const presentNames = new Set(allTasks.map(t => t.responsible_unit).filter(Boolean));
@@ -1279,42 +1297,22 @@
         return [...ordered, ...remaining];
       })();
 
-      let html = '';
-      // 总览块
-      html += `
-        <div class="stats-unit-block">
-          <div class="unit-title">总览</div>
-          <div class="chart-row">
-            <div class="chart-card"><h4>完成状态分布</h4><canvas id="ov-chart-status"></canvas></div>
-            <div class="chart-card"><h4>各任务类别完成情况</h4><canvas id="ov-chart-category"></canvas></div>
-          </div>
-        </div>`;
-      // 每个单位一块
-      unitsWithTasks.forEach((unit, idx) => {
-        html += `
-          <div class="stats-unit-block">
-            <div class="unit-title">${esc(unit)}</div>
-            <div class="chart-row">
-              <div class="chart-card"><h4>完成状态分布</h4><canvas id="u-chart-status-${idx}"></canvas></div>
-              <div class="chart-card"><h4>各任务类别完成情况</h4><canvas id="u-chart-category-${idx}"></canvas></div>
-            </div>
-            ${renderUnitTaskDetails(allTasks.filter(t => t.responsible_unit === unit))}
-          </div>`;
-      });
-      if (unitsWithTasks.length === 0) {
-        html += `<div class="stats-unit-block empty">暂无单位任务数据</div>`;
-      }
-      left.innerHTML = html;
+      // 缓存供两个 tab 复用
+      S.statsCache = { allTasks, unitsWithTasks };
 
-      // 渲染总览
-      renderStatusDoughnut($('#ov-chart-status'), allTasks);
-      renderCategoryBar($('#ov-chart-category'), allTasks);
-      // 渲染每单位
-      unitsWithTasks.forEach((unit, idx) => {
-        const unitTasks = allTasks.filter(t => t.responsible_unit === unit);
-        renderStatusDoughnut($('#u-chart-status-' + idx), unitTasks);
-        renderCategoryBar($('#u-chart-category-' + idx), unitTasks);
-      });
+      // 非管理员：隐藏 tab 栏，强制走 byunit 视图
+      const tabNav = $('#stats-tab-nav');
+      if (tabNav) tabNav.classList.toggle('hidden', !isAdminUser());
+      if (!isAdminUser()) S.statsTab = 'byunit';
+
+      // 真正切换面板（修复：以前没切，导致非管理员还看到空的 overall 面板）
+      $('#stats-tab-overall').classList.toggle('active', S.statsTab === 'overall');
+      $('#stats-tab-byunit').classList.toggle('active', S.statsTab === 'byunit');
+      $$('#stats-tab-nav .tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === S.statsTab));
+
+      // 根据当前激活的 tab 渲染
+      if (S.statsTab === 'byunit') renderStatsByUnit();
+      else renderStatsOverall();
 
     } catch (err) {
       toast(err.message, 'error');
@@ -1645,6 +1643,277 @@
     }
   }
 
+  // ═══════════════════════════════════════════════════
+  //  列隐藏（按账号持久化）+ 已完成行的显示开关
+  // ═══════════════════════════════════════════════════
+  const HIDEABLE_COLUMNS = [
+    { key: 'responsible_unit', label: '责任主体' },
+    { key: 'task_category',    label: '任务类别' },
+    { key: 'task_content',     label: '工作任务' },
+    { key: 'lead_leader',      label: '牵头领导' },
+    { key: 'responsible_person', label: '责任人' },
+    { key: 'deadline',         label: '完成日期' },
+    { key: 'progress',         label: '进度情况' },
+    { key: 'completion_status', label: '完成情况' },
+    { key: 'attach',           label: '证明材料' },
+    { key: 'blockers',         label: '遇到堵点' },
+    { key: 'coordination',     label: '需领导协调事项' },
+  ];
+
+  function getHiddenColumns() {
+    return (S.user && S.user.preferences && Array.isArray(S.user.preferences.hiddenColumns))
+      ? S.user.preferences.hiddenColumns
+      : [];
+  }
+
+  function getShowCompleted() {
+    return !!(S.user && S.user.preferences && S.user.preferences.showCompleted === true);
+  }
+
+  function applyHiddenColumnsFromPrefs() {
+    const hidden = new Set(getHiddenColumns());
+    // 表头
+    $$('#task-table thead th').forEach(th => {
+      const col = th.getAttribute('data-col') || (th.classList.contains('col-attach') ? 'attach' : null);
+      if (!col) return;
+      th.classList.toggle('col-hidden', hidden.has(col));
+    });
+    // 表体（包括"上传"按钮列，通过 data-field=attach 标记）
+    $$('#task-tbody td[data-field]').forEach(td => {
+      const f = td.getAttribute('data-field');
+      td.classList.toggle('col-hidden', hidden.has(f));
+    });
+  }
+
+  function openColSettings() {
+    const hidden = new Set(getHiddenColumns());
+    const showCompleted = getShowCompleted();
+    const list = $('#col-settings-list');
+    const columnHtml = HIDEABLE_COLUMNS.map(c => {
+      const checked = hidden.has(c.key) ? '' : 'checked';
+      return `<label><input type="checkbox" data-kind="col" value="${c.key}" ${checked}> ${esc(c.label)}</label>`;
+    }).join('');
+    list.innerHTML = `
+      <div style="grid-column: 1 / -1; font-size:12px; color: var(--gray-500); margin-bottom:2px;">显示列：</div>
+      ${columnHtml}
+      <div style="grid-column: 1 / -1; font-size:12px; color: var(--gray-500); margin: 6px 0 2px;">行筛选：</div>
+      <label style="grid-column: 1 / -1;">
+        <input type="checkbox" data-kind="show-completed" ${showCompleted ? 'checked' : ''}>
+        显示「已完成」的任务（默认隐藏）
+      </label>
+    `;
+    openModal('modal-col-settings');
+  }
+
+  async function saveColSettings() {
+    const allKeys = HIDEABLE_COLUMNS.map(c => c.key);
+    const visibleCols = $$('#col-settings-list input[data-kind="col"]:checked').map(cb => cb.value);
+    const hidden = allKeys.filter(k => !visibleCols.includes(k));
+    const showCompletedBox = $('#col-settings-list input[data-kind="show-completed"]');
+    const showCompleted = !!(showCompletedBox && showCompletedBox.checked);
+    try {
+      const data = await api('PUT', '/api/me/preferences', { hiddenColumns: hidden, showCompleted });
+      if (S.user) S.user.preferences = data.preferences;
+      // 打开"显示已完成"时，连带清掉"完成情况"列的旧筛选，避免双重过滤遮住已完成
+      if (showCompleted && S.colFilters && S.colFilters.completion_status) {
+        delete S.colFilters.completion_status;
+      }
+      applyHiddenColumnsFromPrefs();
+      renderTaskTable();
+      closeModal('modal-col-settings');
+      toast('列设置已保存', 'success');
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
+  // ═══════════════════════════════════════════════════
+  //  工作台：角色化 feed
+  //   - 主管理员：近 15 天各单位更新条数
+  //   - 普通用户：近 1 个月内下发的事项
+  // ═══════════════════════════════════════════════════
+  async function loadDashboardFeed() {
+    const box = $('#dash-feed');
+    if (!box) return;
+    box.innerHTML = '<p class="text-muted text-center" style="padding:12px;">加载中…</p>';
+    const isAdmin = isAdminUser();
+    try {
+      const data = await api('GET', '/api/dashboard/feed');
+      // 视图依据：前端的 S.user.role；items 用后端返回的（缺则空数组）
+      if (isAdmin) {
+        $('#dash-feed-title').textContent = '近 15 天各单位更新条数';
+        renderAdminFeed(data.items || []);
+      } else {
+        $('#dash-feed-title').textContent = '近 1 个月下发的事项';
+        renderUserFeed(data.items || []);
+      }
+    } catch (err) {
+      box.innerHTML = `<p class="text-center" style="padding:12px;color:#dc2626;">加载失败: ${esc(err.message)}<br><small>提示：服务端可能未重启或接口路径异常</small></p>`;
+    }
+  }
+
+  function renderAdminFeed(rows) {
+    const box = $('#dash-feed');
+    if (!rows.length) {
+      box.innerHTML = '<p class="text-muted text-center" style="padding:12px;">近 15 天暂无单位更新</p>';
+      return;
+    }
+    box.innerHTML = `
+      <table class="unit-issue-table">
+        <thead><tr>
+          <th style="min-width:60px;">排名</th>
+          <th>单位</th>
+          <th style="min-width:120px;text-align:right;">更新条数</th>
+        </tr></thead>
+        <tbody>
+          ${rows.map((r, i) => `
+            <tr>
+              <td>${i + 1}</td>
+              <td>${esc(r.unit || '未分配')}</td>
+              <td style="text-align:right;font-weight:600;">${r.cnt}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  }
+
+  function renderUserFeed(rows) {
+    const box = $('#dash-feed');
+    if (!rows.length) {
+      box.innerHTML = '<p class="text-muted text-center" style="padding:12px;">近 1 个月暂无新下发事项</p>';
+      return;
+    }
+    box.innerHTML = `
+      <table class="unit-issue-table">
+        <thead><tr>
+          <th style="min-width:96px;">下发时间</th>
+          <th style="min-width:120px;">责任主体</th>
+          <th>工作任务</th>
+          <th style="min-width:80px;">责任人</th>
+          <th style="min-width:96px;">完成日期</th>
+          <th style="min-width:80px;">状态</th>
+        </tr></thead>
+        <tbody>
+          ${rows.map(t => `
+            <tr>
+              <td>${formatDate(t.created_at)}</td>
+              <td>${esc(t.responsible_unit)}</td>
+              <td style="white-space:pre-wrap;">${esc(t.task_content)}</td>
+              <td>${esc(t.responsible_person)}</td>
+              <td>${formatDate(t.deadline)}</td>
+              <td>${statusBadge(t.completion_status)}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  }
+
+  // ═══════════════════════════════════════════════════
+  //  已通报（标记 / 取消）+ 折叠开关（已挪到统计页）
+  // ═══════════════════════════════════════════════════
+  async function notifyTask(taskId) {
+    try {
+      await api('POST', '/api/me/notified/' + taskId);
+      // 刷新所在的统计 overall 视图
+      await loadStats();
+    } catch (err) { toast(err.message, 'error'); }
+  }
+
+  async function unnotifyTask(taskId) {
+    try {
+      await api('DELETE', '/api/me/notified/' + taskId);
+      await loadStats();
+    } catch (err) { toast(err.message, 'error'); }
+  }
+
+  async function setFoldNotifiedPref(checked) {
+    if (S.user) {
+      if (!S.user.preferences) S.user.preferences = {};
+      S.user.preferences.foldNotified = checked;
+    }
+    try {
+      await api('PUT', '/api/me/preferences', { foldNotified: checked });
+    } catch (err) { /* 静默 */ }
+    // 即时更新统计页里的折叠
+    $$('#stats-overall-charts tr.notified').forEach(tr => tr.classList.toggle('folded', checked));
+  }
+
+  // ═══════════════════════════════════════════════════
+  //  统计页 Tab + 各单位按钮式
+  // ═══════════════════════════════════════════════════
+  S.statsTab = 'overall';
+  S.statsCache = null; // { allTasks, unitsWithTasks }
+
+  function switchStatsTab(tab) {
+    // 非管理员只允许 byunit 视图（不显示 tab 栏）
+    if (!isAdminUser()) tab = 'byunit';
+    S.statsTab = tab;
+    $$('#stats-tab-nav .tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    $('#stats-tab-overall').classList.toggle('active', tab === 'overall');
+    $('#stats-tab-byunit').classList.toggle('active', tab === 'byunit');
+    if (tab === 'overall') renderStatsOverall();
+    else renderStatsByUnit();
+  }
+
+  function isAdminUser() {
+    return !!(S.user && S.user.role === 'admin');
+  }
+
+  function renderStatsOverall() {
+    if (!S.statsCache) return;
+    const { allTasks } = S.statsCache;
+    const target = $('#stats-overall-charts');
+    const fold = !!($('#toggle-fold-notified') && $('#toggle-fold-notified').checked);
+    const notifiedSet = S.notifiedIds || new Set();
+    target.innerHTML = `
+      <div class="stats-unit-block">
+        <div class="unit-title">总览</div>
+        <div class="chart-row">
+          <div class="chart-card"><h4>完成状态分布</h4><canvas id="ov-chart-status"></canvas></div>
+          <div class="chart-card"><h4>各任务类别完成情况</h4><canvas id="ov-chart-category"></canvas></div>
+        </div>
+        <div class="unit-title" style="margin-top:18px;">全部 临期 / 超期 / 终止 事项</div>
+        ${renderUnitTaskDetails(allTasks, { withNotify: true, notifiedSet, fold })}
+      </div>`;
+    renderStatusDoughnut($('#ov-chart-status'), allTasks);
+    renderCategoryBar($('#ov-chart-category'), allTasks);
+  }
+
+  function renderStatsByUnit() {
+    if (!S.statsCache) return;
+    const { allTasks, unitsWithTasks } = S.statsCache;
+    const bar = $('#stats-unit-buttons');
+    bar.innerHTML = unitsWithTasks.map((u, i) =>
+      `<button class="unit-btn${i === 0 ? ' active' : ''}" data-unit="${esc(u)}">${esc(u)}</button>`
+    ).join('') || '<span class="text-muted">暂无单位任务数据</span>';
+    bar.querySelectorAll('.unit-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        bar.querySelectorAll('.unit-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        renderUnitStatsBlock(btn.dataset.unit, allTasks);
+      });
+    });
+    if (unitsWithTasks.length > 0) {
+      renderUnitStatsBlock(unitsWithTasks[0], allTasks);
+    } else {
+      $('#stats-unit-content').innerHTML = '';
+    }
+  }
+
+  function renderUnitStatsBlock(unit, allTasks) {
+    const unitTasks = allTasks.filter(t => t.responsible_unit === unit);
+    const target = $('#stats-unit-content');
+    target.innerHTML = `
+      <div class="stats-unit-block">
+        <div class="unit-title">${esc(unit)}</div>
+        <div class="chart-row">
+          <div class="chart-card"><h4>完成状态分布</h4><canvas id="u-chart-status"></canvas></div>
+          <div class="chart-card"><h4>各任务类别完成情况</h4><canvas id="u-chart-category"></canvas></div>
+        </div>
+        ${renderUnitTaskDetails(unitTasks)}
+      </div>`;
+    renderStatusDoughnut($('#u-chart-status'), unitTasks);
+    renderCategoryBar($('#u-chart-category'), unitTasks);
+  }
+
   // ─── Event bindings ─────────────────────────────────
   function bindEvents() {
     // Auth
@@ -1752,6 +2021,17 @@
 
     // Stats
     $('#btn-refresh-stats').addEventListener('click', loadStats);
+    $$('#stats-tab-nav .tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => switchStatsTab(btn.dataset.tab));
+    });
+
+    // 列设置
+    $('#btn-col-settings').addEventListener('click', openColSettings);
+    $('#btn-save-col-settings').addEventListener('click', saveColSettings);
+
+    // 工作台单位事项
+    $('#btn-refresh-issues').addEventListener('click', loadDashboardUnitIssues);
+    $('#toggle-fold-notified').addEventListener('change', e => setFoldNotifiedPref(e.target.checked));
 
     // Users
     $('#btn-approve-user').addEventListener('click', approveUser);
@@ -1789,6 +2069,8 @@
     toggleUser,
     editUnit,
     deleteUnit,
+    notifyTask,
+    unnotifyTask,
   };
 
   // ─── Init ───────────────────────────────────────────
